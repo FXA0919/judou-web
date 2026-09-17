@@ -11,7 +11,11 @@ const localModelFiles = new Map([
   ["onnx/model_quantized.onnx", "vendor/kokoro/model/onnx/model_quantized.onnx"],
 ]);
 
-globalThis.fetch = (input, init) => {
+const parallelModelSizes = new Map([
+  ["vendor/kokoro/model/onnx/model_quantized.onnx", 92361116],
+]);
+
+globalThis.fetch = async (input, init) => {
   const rawUrl = typeof input === "string" ? input : input?.url;
   if (rawUrl?.startsWith(huggingFacePrefix)) {
     const relative = rawUrl.slice(huggingFacePrefix.length).split(/[?#]/)[0];
@@ -19,11 +23,86 @@ globalThis.fetch = (input, init) => {
       localModelFiles.get(relative) ||
       (relative.startsWith("voices/") ? `vendor/kokoro/${relative}` : "");
     if (localFile) {
-      return originalFetch(new URL(localFile, base).href, init);
+      const localUrl = new URL(localFile, base).href;
+      if (parallelModelSizes.has(localFile)) {
+        return fetchModelWithRanges(localUrl, parallelModelSizes.get(localFile), init);
+      }
+      return originalFetch(localUrl, init);
     }
   }
   return originalFetch(input, init);
 };
+
+async function fetchModelWithRanges(url, size, init = {}) {
+  const cacheName = "judou-kokoro-models-v1";
+  let cache = null;
+  try {
+    cache = await caches.open(cacheName);
+    const cached = await cache.match(url);
+    if (cached) {
+      return cached;
+    }
+  } catch {
+    cache = null;
+  }
+
+  const probe = await originalFetch(url, {
+    ...init,
+    headers: {
+      ...(init.headers || {}),
+      Range: "bytes=0-0",
+    },
+  }).catch(() => null);
+  if (!probe || probe.status !== 206) {
+    await probe?.body?.cancel().catch(() => undefined);
+    return originalFetch(url, init);
+  }
+  await probe.body?.cancel().catch(() => undefined);
+
+  const chunkCount = 6;
+  const chunkSize = Math.ceil(size / chunkCount);
+  try {
+    const ranges = Array.from({ length: chunkCount }, (_, index) => {
+      const start = index * chunkSize;
+      const end = Math.min(size - 1, start + chunkSize - 1);
+      return { start, end };
+    });
+    const responses = await Promise.all(
+      ranges.map(({ start, end }) =>
+        originalFetch(url, {
+          ...init,
+          headers: {
+            ...(init.headers || {}),
+            Range: `bytes=${start}-${end}`,
+          },
+        }),
+      ),
+    );
+    if (responses.some((response) => response.status !== 206)) {
+      return originalFetch(url, init);
+    }
+    const buffers = await Promise.all(responses.map((response) => response.arrayBuffer()));
+    const merged = new Uint8Array(size);
+    let offset = 0;
+    buffers.forEach((buffer) => {
+      merged.set(new Uint8Array(buffer), offset);
+      offset += buffer.byteLength;
+    });
+    const response = new Response(merged, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(size),
+      },
+    });
+    if (cache) {
+      await cache.put(url, response.clone()).catch(() => undefined);
+    }
+    return response;
+  } catch {
+    return originalFetch(url, init);
+  }
+}
 
 const { KokoroTTS, env } = await import("./vendor/kokoro/kokoro.web.js");
 

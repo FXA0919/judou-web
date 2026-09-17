@@ -44,12 +44,30 @@ export function createStaticServer(rootDirectory) {
     }
 
     const extension = extname(file).toLowerCase();
-    response.writeHead(200, {
+    const fileSize = statSync(file).size;
+    const range = parseRange(request.headers.range, fileSize);
+    const headers = {
       "Content-Type": mimeTypes[extension] || "application/octet-stream",
       "Cache-Control": extension === ".html" ? "no-cache" : "public, max-age=3600",
       "Cross-Origin-Resource-Policy": "same-origin",
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "credentialless",
+      "Accept-Ranges": "bytes",
+    };
+
+    if (range) {
+      response.writeHead(206, {
+        ...headers,
+        "Content-Range": `bytes ${range.start}-${range.end}/${fileSize}`,
+        "Content-Length": String(range.end - range.start + 1),
+      });
+      createReadStream(file, range).pipe(response);
+      return;
+    }
+
+    response.writeHead(200, {
+      ...headers,
+      "Content-Length": String(fileSize),
     });
     createReadStream(file).pipe(response);
   });
@@ -116,4 +134,20 @@ function safePath(root, urlPath) {
   const target = resolve(root, normalized);
   const relativePath = relative(root, target);
   return relativePath.startsWith("..") || isAbsolute(relativePath) ? null : target;
+}
+
+function parseRange(header, size) {
+  if (!header || !header.startsWith("bytes=")) {
+    return null;
+  }
+  const [startText, endText] = header.slice(6).split("-");
+  const start = Number(startText);
+  const end = endText ? Number(endText) : size - 1;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start > end) {
+    return null;
+  }
+  return {
+    start,
+    end: Math.min(end, size - 1),
+  };
 }

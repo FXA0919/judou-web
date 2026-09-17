@@ -942,7 +942,9 @@
         try {
           await assertLocalService();
           const paddle = await loadPaddleOcrModule();
-          await paddle.initializePaddleOcr((stage) => setOCRProgress(0, stage));
+          await paddle.initializePaddleOcr(getPaddleProfile(), (stage) =>
+            setOCRProgress(0, stage),
+          );
           engine = "paddle";
         } catch (error) {
           if (requestedEngine === "paddle") {
@@ -1004,6 +1006,10 @@
     return runtime.ocr.paddleModulePromise;
   }
 
+  function getPaddleProfile() {
+    return project.settings.ocrLanguage === "eng" ? "english" : "multilingual";
+  }
+
   async function assertLocalService() {
     const host = window.location.hostname;
     const isLoopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
@@ -1053,12 +1059,16 @@
       try {
         const prepared = await prepareImageForPaddle(file);
         setOCRProgress(index / project.pages.length, `PaddleOCR · 第 ${index + 1} / ${project.pages.length} 张`);
-        const result = await paddle.recognizeWithPaddleOcr(prepared, (stage) => {
-          setOCRProgress(
-            (index + 0.45) / project.pages.length,
-            `${stage} · 第 ${index + 1} / ${project.pages.length} 张`,
-          );
-        });
+        const result = await paddle.recognizeWithPaddleOcr(
+          prepared,
+          getPaddleProfile(),
+          (stage) => {
+            setOCRProgress(
+              (index + 0.45) / project.pages.length,
+              `${stage} · 第 ${index + 1} / ${project.pages.length} 张`,
+            );
+          },
+        );
         applyStructuredOcrResult(page, window.TextPipeline.fromPaddle(result));
       } catch (error) {
         console.error("PaddleOCR failed", error);
@@ -1863,7 +1873,11 @@
     const bitmap = await loadBitmap(file);
     const longestEdge = Math.max(bitmap.width, bitmap.height);
     const scale =
-      longestEdge > PADDLE_MAX_IMAGE_EDGE ? PADDLE_MAX_IMAGE_EDGE / longestEdge : 1;
+      longestEdge > PADDLE_MAX_IMAGE_EDGE
+        ? PADDLE_MAX_IMAGE_EDGE / longestEdge
+        : longestEdge < 1600
+          ? Math.min(2, 1600 / longestEdge)
+          : 1;
     const width = Math.max(1, Math.round(bitmap.width * scale));
     const height = Math.max(1, Math.round(bitmap.height * scale));
     const source = bitmap.source || bitmap;
@@ -1876,6 +1890,9 @@
     context.fillRect(0, 0, width, height);
     context.drawImage(source, 0, 0, width, height);
     bitmap.close?.();
+    if (project.settings.enhanceImages) {
+      enhanceCanvas(context, width, height);
+    }
     return canvas;
   }
 
@@ -1896,11 +1913,17 @@
     const brightness = average < 120 ? 7 : 2;
 
     for (let index = 0; index < data.length; index += 4) {
-      const gray = data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
-      const adjusted = clamp((gray - 128) * contrast + 128 + brightness, 0, 255);
-      data[index] = adjusted;
-      data[index + 1] = adjusted;
-      data[index + 2] = adjusted;
+      data[index] = clamp((data[index] - 128) * contrast + 128 + brightness, 0, 255);
+      data[index + 1] = clamp(
+        (data[index + 1] - 128) * contrast + 128 + brightness,
+        0,
+        255,
+      );
+      data[index + 2] = clamp(
+        (data[index + 2] - 128) * contrast + 128 + brightness,
+        0,
+        255,
+      );
     }
 
     context.putImageData(imageData, 0, 0);
