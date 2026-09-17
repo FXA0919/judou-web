@@ -976,7 +976,6 @@
       switchView("review");
       const engineLabel = engine === "paddle" ? "PaddleOCR" : "Tesseract";
       toast(`${engineLabel} 识别完成，共 ${project.segments.length} 句`, "success");
-      window.setTimeout(() => preloadNaturalVoice(), 1200);
 
       if (project.settings.autoTranslate && !isChineseSource(project.settings.ocrLanguage)) {
         translateMissingSegments();
@@ -1821,7 +1820,6 @@
     renderEverything();
     switchView("review");
     toast("示例已载入", "success");
-    window.setTimeout(() => preloadNaturalVoice(), 800);
   }
 
   async function createThumbnail(file) {
