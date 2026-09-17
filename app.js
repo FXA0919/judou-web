@@ -1005,10 +1005,13 @@
   }
 
   async function assertLocalService() {
+    const host = window.location.hostname;
+    const isLoopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
     if (
       window.Capacitor?.isNativePlatform?.() ||
       window.Capacitor?.getPlatform?.() === "android" ||
-      window.androidBridge
+      window.androidBridge ||
+      !isLoopback
     ) {
       return;
     }
