@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="把照片中的文字识别、翻译并逐句朗读。"
+    />
+    <title>句读</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%231d2525%22/><path d=%22M20 20h24v6H20zm0 12h24v6H20zm0 12h15v6H20z%22 fill=%22%23f8f4ea%22/><circle cx=%2244%22 cy=%2244%22 r=%228%22 fill=%22%23e85b3f%22/></svg>" />
+    <link rel="stylesheet" href="./styles.css?v=natural-tts-v4" />
+    <script type="importmap">
+      {
+        "imports": {
+          "onnxruntime-web": "./vendor/onnxruntime-web/dist/ort.all.bundle.min.mjs",
+          "ppu-ocv/web": "./vendor/ppu-ocv/index.web.js",
+          "ppu-ocv/canvas-web": "./vendor/ppu-ocv/index.canvas-web.js"
+        }
+      }
+    </script>
+    <script defer src="./vendor/lucide/lucide.min.js"></script>
+    <script defer src="./vendor/tesseract.min.js"></script>
+    <script defer src="./text-engine.js?v=natural-tts-v4"></script>
+    <script defer src="./app.js?v=natural-tts-v4"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar" aria-label="项目列表">
+        <div class="brand-row">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <div>
+            <div class="brand-name">句读</div>
+            <div class="brand-subtitle">Listen &amp; Learn</div>
+          </div>
+        </div>
+
+        <button class="button button-primary sidebar-new" id="newProjectBtn" type="button">
+          <i data-lucide="plus"></i>
+          <span>新建项目</span>
+        </button>
+
+        <div class="sidebar-label">项目</div>
+        <div class="project-list" id="projectList"></div>
+
+        <div class="sidebar-footer">
+          <button class="sidebar-action" id="settingsBtn" type="button">
+            <i data-lucide="settings-2"></i>
+            <span>设置</span>
+          </button>
+          <button class="sidebar-action danger-text" id="deleteProjectBtn" type="button">
+            <i data-lucide="trash-2"></i>
+            <span>删除项目</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <button
+            class="icon-button mobile-menu"
+            id="menuBtn"
+            type="button"
+            title="打开项目列表"
+            aria-label="打开项目列表"
+          >
+            <i data-lucide="menu"></i>
+          </button>
+
+          <div class="project-heading">
+            <input
+              id="projectTitle"
+              class="project-title-input"
+              type="text"
+              value="未命名项目"
+              maxlength="80"
+              aria-label="项目名称"
+            />
+            <div class="save-status" id="saveStatus">已保存</div>
+          </div>
+
+          <nav class="view-tabs" aria-label="工作流程">
+            <button class="view-tab is-active" type="button" data-view="import">
+              <i data-lucide="images"></i>
+              <span>导入</span>
+            </button>
+            <button class="view-tab" type="button" data-view="review">
+              <i data-lucide="text-cursor-input"></i>
+              <span>校对</span>
+            </button>
+            <button class="view-tab" type="button" data-view="listen">
+              <i data-lucide="headphones"></i>
+              <span>跟读</span>
+            </button>
+          </nav>
+        </header>
+
+        <main class="main">
+          <section class="view is-active" id="importView" data-view-panel="import">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">图片转文本</p>
+                <h1>导入学习材料</h1>
+              </div>
+              <div class="heading-actions">
+                <button class="button button-secondary" id="loadSampleBtn" type="button">
+                  <i data-lucide="sparkles"></i>
+                  <span>载入示例</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="import-grid">
+              <div
+                class="drop-zone"
+                id="dropZone"
+                tabindex="0"
+                role="button"
+                aria-label="添加图片"
+              >
+                <div class="drop-icon">
+                  <i data-lucide="image-plus"></i>
+                </div>
+                <div class="drop-title">添加照片或截图</div>
+                <div class="drop-meta">JPG、PNG、WebP，可一次选择多张</div>
+                <button class="button button-primary" id="chooseFilesBtn" type="button">
+                  <i data-lucide="folder-open"></i>
+                  <span>选择图片</span>
+                </button>
+              </div>
+
+              <div class="ocr-options">
+                <div class="option-row">
+                  <label for="ocrEngine">识别引擎</label>
+                  <select id="ocrEngine">
+                    <option value="auto">自动：PaddleOCR 优先</option>
+                    <option value="paddle">PaddleOCR 高精度</option>
+                    <option value="tesseract">Tesseract 快速</option>
+                  </select>
+                </div>
+
+                <div class="option-row">
+                  <label for="ocrLanguage">识别语言</label>
+                  <select id="ocrLanguage">
+                    <option value="eng">English</option>
+                    <option value="chi_sim">简体中文</option>
+                    <option value="eng+chi_sim">English + 简体中文</option>
+                    <option value="jpn">日本語</option>
+                    <option value="kor">한국어</option>
+                    <option value="fra">Français</option>
+                    <option value="deu">Deutsch</option>
+                    <option value="spa">Español</option>
+                    <option value="rus">Русский</option>
+                    <option value="ara">العربية</option>
+                  </select>
+                </div>
+
+                <label class="switch-row" for="enhanceImages">
+                  <span>
+                    <strong>图像增强</strong>
+                    <small>仅用于 Tesseract 快速模式</small>
+                  </span>
+                  <input id="enhanceImages" type="checkbox" checked />
+                  <span class="switch" aria-hidden="true"></span>
+                </label>
+
+                <label class="switch-row" for="autoTranslate">
+                  <span>
+                    <strong>自动翻译</strong>
+                    <small>识别完成后生成中文译文</small>
+                  </span>
+                  <input id="autoTranslate" type="checkbox" checked />
+                  <span class="switch" aria-hidden="true"></span>
+                </label>
+
+                <label class="switch-row" for="grammarCheck">
+                  <span>
+                    <strong>语法校对</strong>
+                    <small>先修正英文语法，再生成译文</small>
+                  </span>
+                  <input id="grammarCheck" type="checkbox" checked />
+                  <span class="switch" aria-hidden="true"></span>
+                </label>
+
+                <button
+                  class="button button-primary process-button"
+                  id="processBtn"
+                  type="button"
+                  disabled
+                >
+                  <i data-lucide="scan-text"></i>
+                  <span>开始识别</span>
+                </button>
+                <div class="process-progress" id="ocrProgress" hidden>
+                  <div class="progress-copy">
+                    <span id="ocrProgressLabel">准备中</span>
+                    <span id="ocrProgressValue">0%</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-bar" id="ocrProgressBar"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="page-section">
+              <div class="section-subheading">
+                <div>
+                  <h2>页面顺序</h2>
+                  <span id="pageCountLabel">0 张图片</span>
+                </div>
+                <button class="button button-quiet" id="addMoreBtn" type="button">
+                  <i data-lucide="plus"></i>
+                  <span>继续添加</span>
+                </button>
+              </div>
+              <div class="page-grid" id="pageGrid"></div>
+            </div>
+          </section>
+
+          <section class="view" id="reviewView" data-view-panel="review">
+            <div class="section-heading compact-heading">
+              <div>
+                <p class="eyebrow">校对与翻译</p>
+                <h1>逐句检查</h1>
+              </div>
+              <div class="heading-actions">
+                <button class="button button-secondary" id="editSourceBtn" type="button">
+                  <i data-lucide="file-pen-line"></i>
+                  <span>全文编辑</span>
+                </button>
+                <button class="button button-primary" id="resegmentBtn" type="button">
+                  <i data-lucide="split"></i>
+                  <span>重新分句</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="review-summary">
+              <div class="summary-item">
+                <i data-lucide="align-left"></i>
+                <span><strong id="segmentCount">0</strong> 句</span>
+              </div>
+              <div class="summary-item">
+                <i data-lucide="languages"></i>
+                <span><strong id="translatedCount">0</strong> 句已翻译</span>
+              </div>
+              <div class="summary-item">
+                <i data-lucide="spell-check-2"></i>
+                <span><strong id="grammarCount">0</strong> 句已修正</span>
+              </div>
+              <div class="summary-spacer"></div>
+              <button class="button button-secondary" id="grammarReviewBtn" type="button">
+                <i data-lucide="badge-check"></i>
+                <span id="grammarButtonLabel">语法校对</span>
+              </button>
+              <button class="button button-secondary" id="translateBtn" type="button">
+                <i data-lucide="wand-sparkles"></i>
+                <span id="translateButtonLabel">自动翻译</span>
+              </button>
+            </div>
+
+            <div class="translation-status grammar-status" id="grammarStatus" hidden>
+              <div class="progress-copy">
+                <span id="grammarStatusLabel">正在校对语法</span>
+                <span id="grammarStatusValue"></span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-bar grammar" id="grammarProgressBar"></div>
+              </div>
+            </div>
+
+            <div class="translation-status" id="translationStatus" hidden>
+              <div class="progress-copy">
+                <span id="translationStatusLabel">正在翻译</span>
+                <span id="translationStatusValue"></span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-bar teal" id="translationProgressBar"></div>
+              </div>
+            </div>
+
+            <div class="segment-list" id="segmentList"></div>
+          </section>
+
+          <section class="view" id="listenView" data-view-panel="listen">
+            <div class="listen-layout">
+              <div class="player-column">
+                <div class="now-playing">
+                  <div class="now-playing-top">
+                    <span class="eyebrow">正在朗读</span>
+                    <span id="playbackCounter">0 / 0</span>
+                  </div>
+                  <div class="focus-sentence" id="focusSentence">
+                    添加图片并完成识别后，可在这里逐句跟读。
+                  </div>
+                  <div class="focus-translation" id="focusTranslation"></div>
+
+                  <div class="voice-module-row">
+                    <span>声音模块</span>
+                    <div class="voice-module-switcher" id="voiceModuleSwitcher" role="group" aria-label="声音模块">
+                      <button type="button" data-voice-module="neural:female">女生</button>
+                      <button type="button" data-voice-module="neural:male">男声</button>
+                      <button type="button" data-voice-module="neural:girl">少女</button>
+                    </div>
+                  </div>
+
+                  <div class="playback-controls">
+                    <button
+                      class="icon-button"
+                      id="previousBtn"
+                      type="button"
+                      title="上一句"
+                      aria-label="上一句"
+                    >
+                      <i data-lucide="skip-back"></i>
+                    </button>
+                    <button
+                      class="play-button"
+                      id="playPauseBtn"
+                      type="button"
+                      title="播放"
+                      aria-label="播放"
+                    >
+                      <i data-lucide="play"></i>
+                    </button>
+                    <button
+                      class="icon-button"
+                      id="nextBtn"
+                      type="button"
+                      title="下一句"
+                      aria-label="下一句"
+                    >
+                      <i data-lucide="skip-forward"></i>
+                    </button>
+                    <button
+                      class="icon-button"
+                      id="repeatBtn"
+                      type="button"
+                      title="重复当前句"
+                      aria-label="重复当前句"
+                    >
+                      <i data-lucide="repeat-2"></i>
+                    </button>
+                    <div class="speed-control">
+                      <i data-lucide="gauge"></i>
+                      <input
+                        id="quickRate"
+                        type="range"
+                        min="0.6"
+                        max="1.4"
+                        step="0.1"
+                        value="1"
+                        aria-label="朗读速度"
+                      />
+                      <span id="quickRateValue">1.0x</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="listen-list-header">
+                  <h2>句子列表</h2>
+                  <label class="inline-check">
+                    <input id="showTranslations" type="checkbox" checked />
+                    <span>显示译文</span>
+                  </label>
+                </div>
+                <div class="listen-list" id="listenList"></div>
+              </div>
+
+              <aside class="playback-panel">
+                <h2>朗读设置</h2>
+
+                <label class="panel-label" for="voiceSelect">声音</label>
+                <select id="voiceSelect">
+                  <option value="">自动匹配</option>
+                </select>
+
+                <label class="panel-label" for="rateControl">
+                  速度 <span id="rateValue">1.0x</span>
+                </label>
+                <input id="rateControl" type="range" min="0.6" max="1.4" step="0.1" value="1" />
+
+                <label class="panel-label" for="repeatSelect">每句重复</label>
+                <select id="repeatSelect">
+                  <option value="1">1 次</option>
+                  <option value="2">2 次</option>
+                  <option value="3">3 次</option>
+                </select>
+
+                <label class="panel-label" for="gapControl">
+                  句间停顿 <span id="gapValue">0.4 秒</span>
+                </label>
+                <input id="gapControl" type="range" min="0" max="2" step="0.2" value="0.4" />
+
+                <label class="switch-row compact-switch" for="loopAll">
+                  <span>
+                    <strong>整篇循环</strong>
+                  </span>
+                  <input id="loopAll" type="checkbox" />
+                  <span class="switch" aria-hidden="true"></span>
+                </label>
+              </aside>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <input id="fileInput" type="file" accept="image/*" multiple hidden />
+
+    <dialog class="dialog" id="sourceDialog">
+      <form method="dialog" class="dialog-card">
+        <div class="dialog-header">
+          <div>
+            <p class="eyebrow">原始文本</p>
+            <h2>全文编辑</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="关闭" title="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <textarea id="sourceText" rows="18" spellcheck="false"></textarea>
+        <div class="dialog-actions">
+          <button class="button button-secondary" value="cancel" type="button" id="cancelSourceBtn">
+            取消
+          </button>
+          <button class="button button-primary" value="default" type="button" id="applySourceBtn">
+            <i data-lucide="check"></i>
+            <span>应用并分句</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="dialog image-preview-dialog" id="imagePreviewDialog">
+      <div class="image-preview-card">
+        <div class="image-preview-header">
+          <div class="image-preview-heading">
+            <p class="eyebrow">图片预览</p>
+            <h2 id="previewImageName">未命名图片</h2>
+          </div>
+          <div class="image-preview-header-actions">
+            <span class="image-preview-counter" id="previewPageCounter">1 / 1</span>
+            <button
+              class="icon-button"
+              id="closePreviewBtn"
+              type="button"
+              title="关闭"
+              aria-label="关闭"
+            >
+              <i data-lucide="x"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="image-preview-stage" id="imagePreviewStage">
+          <img id="previewImage" alt="" />
+        </div>
+
+        <div class="image-preview-toolbar">
+          <button
+            class="icon-button"
+            id="previewPreviousBtn"
+            type="button"
+            title="上一张"
+            aria-label="上一张"
+          >
+            <i data-lucide="chevron-left"></i>
+          </button>
+          <button
+            class="icon-button"
+            id="previewNextBtn"
+            type="button"
+            title="下一张"
+            aria-label="下一张"
+          >
+            <i data-lucide="chevron-right"></i>
+          </button>
+          <span class="preview-toolbar-spacer"></span>
+          <button
+            class="icon-button"
+            id="previewZoomOutBtn"
+            type="button"
+            title="缩小"
+            aria-label="缩小"
+          >
+            <i data-lucide="zoom-out"></i>
+          </button>
+          <span class="preview-zoom-value" id="previewZoomValue">100%</span>
+          <button
+            class="icon-button"
+            id="previewZoomInBtn"
+            type="button"
+            title="放大"
+            aria-label="放大"
+          >
+            <i data-lucide="zoom-in"></i>
+          </button>
+          <button
+            class="icon-button"
+            id="previewResetBtn"
+            type="button"
+            title="适应窗口"
+            aria-label="适应窗口"
+          >
+            <i data-lucide="scan"></i>
+          </button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="dialog" id="settingsDialog">
+      <form method="dialog" class="dialog-card compact-dialog">
+        <div class="dialog-header">
+          <div>
+            <p class="eyebrow">偏好设置</p>
+            <h2>翻译与数据</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="关闭" title="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+
+        <label class="panel-label" for="translationProvider">翻译服务</label>
+        <select id="translationProvider">
+          <option value="auto">自动选择</option>
+          <option value="browser">浏览器内置翻译</option>
+          <option value="mymemory">MyMemory 公共接口</option>
+        </select>
+        <p class="field-note">翻译时，句子文本会发送到所选服务。</p>
+
+        <div class="settings-list">
+          <div>
+            <strong>本地保存</strong>
+            <span>项目保存在当前浏览器中</span>
+          </div>
+          <button class="button button-danger-outline" id="clearAllBtn" type="button">
+            <i data-lucide="database-zap"></i>
+            <span>清除全部项目</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+  </body>
+</html>
