@@ -10,6 +10,39 @@
   const MAX_IMAGE_EDGE = 2400;
   const PADDLE_MAX_IMAGE_EDGE = 2800;
 
+  const OCR_RUNTIME_MODULES = [
+    "./paddle-ocr.mjs",
+    "./vendor/onnxruntime-web/dist/ort.all.bundle.min.mjs",
+    "./vendor/ppu-paddle-ocr/web/index.js",
+    "./vendor/ppu-paddle-ocr/web/paddle-ocr.service.web.js",
+    "./vendor/ppu-paddle-ocr/web/detection.service.web.js",
+    "./vendor/ppu-paddle-ocr/web/recognition.service.web.js",
+    "./vendor/ppu-paddle-ocr/web/platform.web.js",
+    "./vendor/ppu-paddle-ocr/model-catalogue.js",
+    "./vendor/ppu-paddle-ocr/constants.js",
+    "./vendor/ppu-paddle-ocr/utils.js",
+    "./vendor/ppu-paddle-ocr/core/one-shot.js",
+    "./vendor/ppu-paddle-ocr/core/base-paddle-ocr.service.js",
+    "./vendor/ppu-paddle-ocr/core/base-detection.service.js",
+    "./vendor/ppu-paddle-ocr/core/base-recognition.service.js",
+    "./vendor/ppu-paddle-ocr/core/session-factory.js",
+    "./vendor/ppu-paddle-ocr/core/batch.js",
+    "./vendor/ppu-paddle-ocr/core/image-cache.js",
+    "./vendor/ppu-paddle-ocr/core/detection/box-geometry.js",
+    "./vendor/ppu-paddle-ocr/core/detection/crop-boxes.js",
+    "./vendor/ppu-paddle-ocr/core/detection/image-tensor.js",
+    "./vendor/ppu-paddle-ocr/core/recognition/batched.js",
+    "./vendor/ppu-paddle-ocr/core/recognition/ctc.js",
+    "./vendor/ppu-paddle-ocr/core/recognition/image-tensor.js",
+    "./vendor/ppu-paddle-ocr/core/recognition/line-grouping.js",
+    "./vendor/ppu-paddle-ocr/core/recognition/strategies.js",
+    "./vendor/ppu-ocv/index.canvas-web.js",
+    "./vendor/ppu-ocv/canvas-factory.js",
+    "./vendor/ppu-ocv/canvas-processor.js",
+    "./vendor/ppu-ocv/canvas-toolkit.base.js",
+    "./vendor/ppu-ocv/platform/web.js",
+  ];
+
   const LANGUAGE_INFO = {
     eng: {
       speech: "en-US",
@@ -116,6 +149,7 @@
       paddleModulePromise: null,
       language: "",
       engineUsed: "",
+      preloadPromise: null,
       active: false,
       pageIndex: 0,
       pageCount: 0,
@@ -179,6 +213,7 @@
     renderEverything();
     setupVoices();
     renderIcons();
+    scheduleOcrRuntimePreload();
   }
 
   function cacheDom() {
@@ -940,6 +975,7 @@
       const requestedEngine = project.settings.ocrEngine;
       if (requestedEngine === "paddle" || requestedEngine === "auto") {
         try {
+          void preloadOcrRuntime();
           await assertLocalService();
           const paddle = await loadPaddleOcrModule();
           await paddle.initializePaddleOcr(getPaddleProfile(), (stage) =>
@@ -1003,6 +1039,32 @@
       });
     }
     return runtime.ocr.paddleModulePromise;
+  }
+
+  function scheduleOcrRuntimePreload() {
+    const start = () => {
+      void preloadOcrRuntime();
+    };
+    if ("requestIdleCallback" in window) {
+      window.requestIdleCallback(start, { timeout: 1800 });
+    } else {
+      window.setTimeout(start, 900);
+    }
+  }
+
+  function preloadOcrRuntime() {
+    if (runtime.ocr.preloadPromise) {
+      return runtime.ocr.preloadPromise;
+    }
+    runtime.ocr.preloadPromise = Promise.allSettled(
+      OCR_RUNTIME_MODULES.map(async (path) => {
+        const response = await fetch(new URL(path, window.location.href), {
+          cache: "force-cache",
+        });
+        await response.arrayBuffer();
+      }),
+    ).catch(() => undefined);
+    return runtime.ocr.preloadPromise;
   }
 
   function getPaddleProfile() {
