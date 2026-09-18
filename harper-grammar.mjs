@@ -66,7 +66,22 @@ async function resolveWasmUrl() {
     return wasmUrl;
   }
   try {
+    const cache = await caches.open("judou-harper-model-v1");
+    const cached = await cache.match(wasmUrl);
+    if (cached) {
+      return URL.createObjectURL(
+        new Blob([await cached.arrayBuffer()], { type: "application/wasm" }),
+      );
+    }
     const buffer = await fetchCompressedWasm();
+    await cache
+      .put(
+        wasmUrl,
+        new Response(buffer, {
+          headers: { "Content-Type": "application/wasm" },
+        }),
+      )
+      .catch(() => undefined);
     const blobUrl = URL.createObjectURL(
       new Blob([buffer], { type: "application/wasm" }),
     );

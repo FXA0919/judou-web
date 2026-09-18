@@ -1515,7 +1515,7 @@
 
     try {
       await assertLocalService();
-      const grammar = await import("./harper-runtime.bundle.mjs");
+      const grammar = await import("./harper-runtime.bundle.mjs?v=grammar-v15");
       for (let index = 0; index < targets.length; index += 1) {
         const segment = targets[index];
         if (token !== runtime.grammar.token || !runtime.grammar.active) {
