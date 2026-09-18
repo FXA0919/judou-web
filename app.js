@@ -10,12 +10,6 @@
   const MAX_IMAGE_EDGE = 2400;
   const PADDLE_MAX_IMAGE_EDGE = 2800;
 
-  const OCR_RUNTIME_MODULES = [
-    "./paddle-ocr.mjs",
-    "./paddle-runtime.bundle.mjs",
-    "./harper-runtime.bundle.mjs",
-  ];
-
   const LANGUAGE_INFO = {
     eng: {
       speech: "en-US",
@@ -186,7 +180,7 @@
     renderEverything();
     setupVoices();
     renderIcons();
-    scheduleOcrRuntimePreload();
+    registerServiceWorker();
   }
 
   function cacheDom() {
@@ -701,6 +695,24 @@
     runtime.saveTimer = setTimeout(commitSave, 450);
   }
 
+  function registerServiceWorker() {
+    if (
+      !("serviceWorker" in navigator) ||
+      window.location.protocol !== "https:" ||
+      window.Capacitor?.isNativePlatform?.() ||
+      window.androidBridge
+    ) {
+      return;
+    }
+    window.addEventListener(
+      "load",
+      () => {
+        navigator.serviceWorker.register("./sw.js").catch(() => undefined);
+      },
+      { once: true },
+    );
+  }
+
   function commitSave() {
     if (runtime.saveTimer) {
       clearTimeout(runtime.saveTimer);
@@ -948,7 +960,6 @@
       const requestedEngine = project.settings.ocrEngine;
       if (requestedEngine === "paddle" || requestedEngine === "auto") {
         try {
-          void preloadOcrRuntime();
           await assertLocalService();
           const paddle = await loadPaddleOcrModule();
           await paddle.initializePaddleOcr(getPaddleProfile(), (stage) =>
@@ -1014,30 +1025,31 @@
     return runtime.ocr.paddleModulePromise;
   }
 
-  function scheduleOcrRuntimePreload() {
-    const start = () => {
-      void preloadOcrRuntime();
-    };
-    if ("requestIdleCallback" in window) {
-      window.requestIdleCallback(start, { timeout: 1800 });
-    } else {
-      window.setTimeout(start, 900);
+  function loadScriptOnce(url) {
+    const target = String(url);
+    const existing = document.querySelector(
+      `script[data-runtime-src="${cssEscape(target)}"]`,
+    );
+    if (existing) {
+      return new Promise((resolve, reject) => {
+        if (window.Tesseract) {
+          resolve();
+          return;
+        }
+        existing.addEventListener("load", resolve, { once: true });
+        existing.addEventListener("error", reject, { once: true });
+      });
     }
-  }
 
-  function preloadOcrRuntime() {
-    if (runtime.ocr.preloadPromise) {
-      return runtime.ocr.preloadPromise;
-    }
-    runtime.ocr.preloadPromise = Promise.allSettled(
-      OCR_RUNTIME_MODULES.map(async (path) => {
-        const response = await fetch(new URL(path, window.location.href), {
-          cache: "force-cache",
-        });
-        await response.arrayBuffer();
-      }),
-    ).catch(() => undefined);
-    return runtime.ocr.preloadPromise;
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = target;
+      script.async = true;
+      script.dataset.runtimeSrc = target;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error(`Failed to load script: ${target}`));
+      document.head.appendChild(script);
+    });
   }
 
   function getPaddleProfile() {
@@ -1117,6 +1129,9 @@
   }
 
   async function runTesseractOcrPipeline() {
+    if (!window.Tesseract) {
+      await loadScriptOnce(new URL("vendor/tesseract.min.js", window.location.href));
+    }
     if (!window.Tesseract) {
       throw new Error("Tesseract is not loaded");
     }
