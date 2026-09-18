@@ -1,0 +1,29 @@
+{
+  "rawBytes": 92361116,
+  "gzipBytes": 61534734,
+  "chunkCount": 4,
+  "chunkSize": 15383684,
+  "sha256": "ee7c39f11407b68cf38adab76ccad2b9e30ac6f9a20c88f60ce558f43ef5aa21",
+  "parts": [
+    {
+      "name": "model_quantized.onnx.gz.part0",
+      "bytes": 15383684,
+      "sha256": "212ae8aa86d3a9075173627f414e3e96ce74acb5d9f120ea18ad7d4a1221c831"
+    },
+    {
+      "name": "model_quantized.onnx.gz.part1",
+      "bytes": 15383684,
+      "sha256": "06b8b0a9c1f830c42b4d98160bc42ebb9d157b1e814f04ae8ee0c8d588a8da0a"
+    },
+    {
+      "name": "model_quantized.onnx.gz.part2",
+      "bytes": 15383684,
+      "sha256": "cd8d4ee57391b6a912b86b78f7a9c15037c7c1005d5e62eefaca6a4f9146ec12"
+    },
+    {
+      "name": "model_quantized.onnx.gz.part3",
+      "bytes": 15383682,
+      "sha256": "2b32036edbbf172464f86386d9a79e0fefacc827884c3a715cf3107ec27ede0a"
+    }
+  ]
+}

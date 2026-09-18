@@ -2,6 +2,20 @@ const base = new URL("./", import.meta.url);
 const originalFetch = globalThis.fetch.bind(globalThis);
 const huggingFacePrefix =
   "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/";
+const mirrorPrefix =
+  "https://hf-mirror.com/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/";
+const chunkVersion = "ee7c39f11407b68cf38adab76ccad2b9e30ac6f9a20c88f60ce558f43ef5aa21";
+const chunkParts = [
+  { name: "model_quantized.onnx.gz.part0", bytes: 15383684 },
+  { name: "model_quantized.onnx.gz.part1", bytes: 15383684 },
+  { name: "model_quantized.onnx.gz.part2", bytes: 15383684 },
+  { name: "model_quantized.onnx.gz.part3", bytes: 15383682 },
+];
+const chunkHosts = [
+  "https://gcore.jsdelivr.net/gh/FXA0919/judou-web@main/",
+  "https://cdn.jsdelivr.net/gh/FXA0919/judou-web@main/",
+  "https://fastly.jsdelivr.net/gh/FXA0919/judou-web@main/",
+];
 
 const localModelFiles = new Map([
   ["config.json", "vendor/kokoro/model/config.json"],
@@ -15,6 +29,9 @@ const parallelModelSizes = new Map([
   ["vendor/kokoro/model/onnx/model_quantized.onnx", 92361116],
 ]);
 
+let activeStageCallback = () => {};
+let modelReady = false;
+
 globalThis.fetch = async (input, init) => {
   const rawUrl = typeof input === "string" ? input : input?.url;
   if (rawUrl?.startsWith(huggingFacePrefix)) {
@@ -25,7 +42,23 @@ globalThis.fetch = async (input, init) => {
     if (localFile) {
       const localUrl = new URL(localFile, base).href;
       if (parallelModelSizes.has(localFile)) {
-        return fetchModelWithRanges(localUrl, parallelModelSizes.get(localFile), init);
+        const mirrorUrl = `${mirrorPrefix}${relative}`;
+        return fetchModelFromSources(
+          [
+            {
+              mode: "gzip-chunks",
+              label: "国内 CDN 加速",
+              parts: chunkParts,
+              hosts: chunkHosts,
+              gzipSize: chunkParts.reduce((sum, part) => sum + part.bytes, 0),
+            },
+            { url: localUrl, mode: "ranges", label: "GitHub Pages" },
+            { url: mirrorUrl, mode: "direct", label: "国内镜像" },
+          ],
+          localUrl,
+          parallelModelSizes.get(localFile),
+          init,
+        );
       }
       return originalFetch(localUrl, init);
     }
@@ -33,19 +66,149 @@ globalThis.fetch = async (input, init) => {
   return originalFetch(input, init);
 };
 
-async function fetchModelWithRanges(url, size, init = {}) {
+async function fetchModelFromSources(sources, cacheKey, size, init = {}) {
   const cacheName = "judou-kokoro-models-v1";
   let cache = null;
   try {
     cache = await caches.open(cacheName);
-    const cached = await cache.match(url);
+    const cached = await cache.match(cacheKey);
     if (cached) {
+      activeStageCallback("语音模型已从缓存读取");
       return cached;
     }
   } catch {
     cache = null;
   }
 
+  let lastError = null;
+  for (const source of sources) {
+    try {
+      activeStageCallback(`从${source.label}加载语音模型 0%`);
+      const buffer =
+        source.mode === "gzip-chunks"
+          ? await fetchModelFromGzipChunks(source, size, init)
+          : source.mode === "ranges"
+            ? await fetchModelWithRanges(source.url, size, init)
+            : await fetchModelDirect(source.url, size, init);
+      if (!buffer || buffer.byteLength < size * 0.98) {
+        throw new Error(`Incomplete voice model from ${source.url}`);
+      }
+      const response = new Response(buffer, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(buffer.byteLength),
+        },
+      });
+      if (cache) {
+        await cache.put(cacheKey, response.clone()).catch(() => undefined);
+      }
+      activeStageCallback("语音模型加载完成");
+      return response;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("Unable to download voice model");
+}
+
+async function fetchModelFromGzipChunks(source, size, init = {}) {
+  let received = 0;
+  const compressed = await Promise.all(
+    source.parts.map((part) =>
+      fetchChunkPart(part, source, init).then((buffer) => {
+        received += buffer.byteLength;
+        reportModelProgress(received, source.gzipSize);
+        return new Uint8Array(buffer);
+      }),
+    ),
+  );
+  const merged = new Uint8Array(source.gzipSize);
+  let offset = 0;
+  compressed.forEach((part) => {
+    merged.set(part, offset);
+    offset += part.byteLength;
+  });
+  activeStageCallback("正在解压语音模型");
+  return decompressGzip(merged.buffer, size);
+}
+
+async function fetchChunkPart(part, source, init = {}) {
+  const relative = `vendor/kokoro/model/onnx/chunks/${part.name}?v=${chunkVersion}`;
+  const urls = source.hosts.map((host) => `${host}${relative}`);
+  urls.push(new URL(`vendor/kokoro/model/onnx/chunks/${part.name}`, base).href);
+
+  let lastError = null;
+  for (const url of urls) {
+    try {
+      const response = await originalFetch(url, {
+        signal: init.signal,
+        cache: "force-cache",
+      });
+      if (!response.ok) {
+        throw new Error(`Voice model chunk request failed: ${response.status}`);
+      }
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength !== part.bytes) {
+        throw new Error(`Voice model chunk size mismatch: ${part.name}`);
+      }
+      return buffer;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error(`Unable to fetch ${part.name}`);
+}
+
+async function decompressGzip(buffer, expectedSize) {
+  if (!("DecompressionStream" in globalThis)) {
+    throw new Error("This browser does not support gzip decompression");
+  }
+  const stream = new Blob([buffer])
+    .stream()
+    .pipeThrough(new DecompressionStream("gzip"));
+  const output = await new Response(stream).arrayBuffer();
+  if (output.byteLength < expectedSize * 0.98) {
+    throw new Error("Decompressed voice model is incomplete");
+  }
+  return output;
+}
+
+async function fetchModelDirect(url, size, init = {}) {
+  const response = await originalFetch(url, init);
+  if (!response.ok) {
+    throw new Error(`Voice model request failed: ${response.status}`);
+  }
+  const expected = Number(response.headers.get("content-length")) || size;
+  if (!response.body) {
+    const buffer = await response.arrayBuffer();
+    reportModelProgress(buffer.byteLength, expected);
+    return buffer;
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    chunks.push(value);
+    received += value.byteLength;
+    reportModelProgress(received, expected);
+  }
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  });
+  return merged.buffer;
+}
+
+async function fetchModelWithRanges(url, size, init = {}) {
   const probe = await originalFetch(url, {
     ...init,
     headers: {
@@ -55,53 +218,48 @@ async function fetchModelWithRanges(url, size, init = {}) {
   }).catch(() => null);
   if (!probe || probe.status !== 206) {
     await probe?.body?.cancel().catch(() => undefined);
-    return originalFetch(url, init);
+    return fetchModelDirect(url, size, init);
   }
   await probe.body?.cancel().catch(() => undefined);
 
   const chunkCount = 6;
   const chunkSize = Math.ceil(size / chunkCount);
-  try {
-    const ranges = Array.from({ length: chunkCount }, (_, index) => {
-      const start = index * chunkSize;
-      const end = Math.min(size - 1, start + chunkSize - 1);
-      return { start, end };
-    });
-    const responses = await Promise.all(
-      ranges.map(({ start, end }) =>
-        originalFetch(url, {
-          ...init,
-          headers: {
-            ...(init.headers || {}),
-            Range: `bytes=${start}-${end}`,
-          },
-        }),
-      ),
-    );
-    if (responses.some((response) => response.status !== 206)) {
-      return originalFetch(url, init);
-    }
-    const buffers = await Promise.all(responses.map((response) => response.arrayBuffer()));
-    const merged = new Uint8Array(size);
-    let offset = 0;
-    buffers.forEach((buffer) => {
-      merged.set(new Uint8Array(buffer), offset);
-      offset += buffer.byteLength;
-    });
-    const response = new Response(merged, {
-      status: 200,
-      headers: {
-        "Content-Type": "application/octet-stream",
-        "Content-Length": String(size),
-      },
-    });
-    if (cache) {
-      await cache.put(url, response.clone()).catch(() => undefined);
-    }
-    return response;
-  } catch {
-    return originalFetch(url, init);
+  const ranges = Array.from({ length: chunkCount }, (_, index) => {
+    const start = index * chunkSize;
+    const end = Math.min(size - 1, start + chunkSize - 1);
+    return { start, end };
+  });
+  const responses = await Promise.all(
+    ranges.map(({ start, end }) =>
+      originalFetch(url, {
+        ...init,
+        headers: {
+          ...(init.headers || {}),
+          Range: `bytes=${start}-${end}`,
+        },
+      }),
+    ),
+  );
+  if (responses.some((response) => response.status !== 206)) {
+    return fetchModelDirect(url, size, init);
   }
+  const buffers = await Promise.all(responses.map((response) => response.arrayBuffer()));
+  const merged = new Uint8Array(size);
+  let offset = 0;
+  buffers.forEach((buffer) => {
+    merged.set(new Uint8Array(buffer), offset);
+    offset += buffer.byteLength;
+  });
+  reportModelProgress(offset, size);
+  return merged.buffer;
+}
+
+function reportModelProgress(received, total) {
+  if (!total || !Number.isFinite(total)) {
+    return;
+  }
+  const percent = Math.min(100, Math.round((received / total) * 100));
+  activeStageCallback(`加载语音模型 ${percent}%`);
 }
 
 const { KokoroTTS, env } = await import("./vendor/kokoro/kokoro.web.js");
@@ -144,11 +302,17 @@ export function getNeuralVoiceKey(value) {
   return NEURAL_VOICES[key] ? key : "";
 }
 
+export function isKokoroReady() {
+  return modelReady;
+}
+
 export async function warmUpKokoro(
   onStage = () => {},
   { device = "wasm", dtype = "q8" } = {},
 ) {
   if (!ttsPromise) {
+    activeStageCallback = typeof onStage === "function" ? onStage : () => {};
+    modelReady = false;
     onStage("加载 Kokoro 自然语音");
     ttsPromise = KokoroTTS.from_pretrained(
       "onnx-community/Kokoro-82M-v1.0-ONNX",
@@ -161,10 +325,17 @@ export async function warmUpKokoro(
           }
         },
       },
-    ).catch((error) => {
-      ttsPromise = null;
-      throw error;
-    });
+    )
+      .then((tts) => {
+        modelReady = true;
+        activeStageCallback("语音模型已就绪");
+        return tts;
+      })
+      .catch((error) => {
+        ttsPromise = null;
+        modelReady = false;
+        throw error;
+      });
   }
   return ttsPromise;
 }

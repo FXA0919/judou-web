@@ -140,10 +140,15 @@
       audioContext: null,
       source: null,
       gainNode: null,
+      ready: false,
+      loading: false,
+      warmupPromise: null,
+      fallbackNoticeShown: false,
       generating: false,
       prefetchIndex: -1,
       prefetchPromise: null,
       prepareToken: 0,
+      prefetchToken: 0,
     },
     player: {
       state: "idle",
@@ -174,13 +179,13 @@
   async function init() {
     cacheDom();
     bindStaticEvents();
+    registerServiceWorker();
     await openDatabase();
     await loadInitialProject();
     syncControlsFromProject();
     renderEverything();
     setupVoices();
     renderIcons();
-    registerServiceWorker();
   }
 
   function cacheDom() {
@@ -448,6 +453,7 @@
       project.settings.voiceURI = dom.voiceSelect.value;
       runtime.neural.prefetchIndex = -1;
       runtime.neural.prefetchPromise = null;
+      runtime.neural.prefetchToken += 1;
       renderVoiceModuleSwitcher();
       scheduleSave();
     });
@@ -704,13 +710,15 @@
     ) {
       return;
     }
-    window.addEventListener(
-      "load",
-      () => {
-        navigator.serviceWorker.register("./sw.js").catch(() => undefined);
-      },
-      { once: true },
-    );
+    const register = () => {
+      navigator.serviceWorker.register("./sw.js").catch(() => undefined);
+    };
+    if (document.readyState === "complete") {
+      register();
+    } else {
+      window.addEventListener("load", register, { once: true });
+      window.setTimeout(register, 3000);
+    }
   }
 
   function commitSave() {
@@ -998,7 +1006,9 @@
       toast(`${engineLabel} 识别完成，共 ${project.segments.length} 句`, "success");
 
       if (project.settings.autoTranslate && !isChineseSource(project.settings.ocrLanguage)) {
-        translateMissingSegments();
+        translateMissingSegments().finally(() => warmUpNaturalVoice());
+      } else {
+        warmUpNaturalVoice();
       }
     } catch (error) {
       console.error("OCR initialization failed", error);
@@ -2431,6 +2441,7 @@
     dom.voiceSelect.value = value;
     runtime.neural.prefetchIndex = -1;
     runtime.neural.prefetchPromise = null;
+    runtime.neural.prefetchToken += 1;
     renderVoiceModuleSwitcher();
     scheduleSave();
     preloadNaturalVoice();
@@ -2515,7 +2526,7 @@
       return;
     }
 
-    if (shouldUseNeuralVoice(segment)) {
+    if (shouldUseNeuralVoice(segment) && runtime.neural.ready) {
       try {
         await speakNeuralSegment(segment, token);
         return;
@@ -2529,6 +2540,19 @@
         console.warn("Natural speech failed, using system speech", error);
         toast("自然语音生成失败，已切换系统语音", "warning");
         renderPlayer();
+      }
+    }
+
+    if (shouldUseNeuralVoice(segment)) {
+      preloadNaturalVoice();
+      if (!runtime.neural.fallbackNoticeShown) {
+        runtime.neural.fallbackNoticeShown = true;
+        dom.playbackCounter.textContent = "自然语音准备中，先用系统语音播放";
+        window.setTimeout(() => {
+          if (token === runtime.player.token && runtime.player.state === "playing") {
+            renderPlayer();
+          }
+        }, 1800);
       }
     }
 
@@ -2547,7 +2571,8 @@
     utterance.voice = voice || null;
     utterance.lang = voice?.lang || speechLocaleForSegment(segment.text);
     utterance.rate = clamp(Number(project.settings.rate) || 1, 0.5, 2);
-    utterance.pitch = 1;
+    const voiceKey = getNeuralVoiceKey(project.settings.voiceURI);
+    utterance.pitch = voiceKey === "girl" ? 1.14 : voiceKey === "male" ? 0.92 : 1;
     utterance.volume = 1;
 
     utterance.onend = () => handleSegmentFinished(token);
@@ -2680,41 +2705,83 @@
     if (!voiceKey) {
       return;
     }
-    const token = runtime.neural.prepareToken + 1;
-    runtime.neural.prepareToken = token;
+    const token = runtime.neural.prefetchToken + 1;
+    runtime.neural.prefetchToken = token;
 
-    (async () => {
-      await assertLocalService();
-      const kokoro = await loadKokoroModule();
-      await kokoro.warmUpKokoro((stage) => {
-        if (runtime.player.state !== "playing") {
-          dom.playbackCounter.textContent = stage;
-        }
-      });
-
-      const start = runtime.player.currentIndex >= 0 ? runtime.player.currentIndex : 0;
-      const end = Math.min(project.segments.length, start + 3);
-      for (let index = start; index < end; index += 1) {
-        if (
-          token !== runtime.neural.prepareToken ||
-          voiceKey !== getNeuralVoiceKey(project.settings.voiceURI)
-        ) {
-          return;
+    warmUpNaturalVoice()
+      .then(async () => {
+        const start = runtime.player.currentIndex >= 0 ? runtime.player.currentIndex : 0;
+        const end = Math.min(project.segments.length, start + 2);
+        for (let index = start; index < end; index += 1) {
+          if (
+            token !== runtime.neural.prefetchToken ||
+            voiceKey !== getNeuralVoiceKey(project.settings.voiceURI)
+          ) {
+            return;
+          }
+          if (runtime.player.state !== "playing") {
+            dom.playbackCounter.textContent = `准备第 ${index + 1} / ${project.segments.length} 句语音`;
+          }
+          await prefetchNeuralSegment(index, token);
         }
         if (runtime.player.state !== "playing") {
-          dom.playbackCounter.textContent = `准备第 ${index + 1} / ${project.segments.length} 句语音`;
+          renderPlayer();
         }
-        await prefetchNeuralSegment(index, token);
-      }
-      if (runtime.player.state !== "playing") {
-        renderPlayer();
-      }
-    })()
+      })
       .catch(() => {
+        runtime.neural.loading = false;
         if (runtime.player.state !== "playing") {
           renderPlayer();
         }
       });
+  }
+
+  function warmUpNaturalVoice() {
+    if (!isNeuralVoiceValue(project.settings.voiceURI)) {
+      return Promise.resolve();
+    }
+    const voiceKey = getNeuralVoiceKey(project.settings.voiceURI);
+    if (!voiceKey) {
+      return Promise.resolve();
+    }
+    if (runtime.neural.ready) {
+      return Promise.resolve();
+    }
+    if (runtime.neural.warmupPromise) {
+      return runtime.neural.warmupPromise;
+    }
+
+    runtime.neural.loading = true;
+    const token = runtime.neural.prepareToken + 1;
+    runtime.neural.prepareToken = token;
+    const promise = assertLocalService()
+      .then(() => loadKokoroModule())
+      .then((kokoro) =>
+        kokoro.warmUpKokoro((stage) => {
+          if (token === runtime.neural.prepareToken && runtime.player.state !== "playing") {
+            dom.playbackCounter.textContent = stage;
+          }
+        }),
+      )
+      .then(() => {
+        if (token === runtime.neural.prepareToken) {
+          runtime.neural.ready = true;
+          runtime.neural.loading = false;
+        }
+      })
+      .catch((error) => {
+        if (token === runtime.neural.prepareToken) {
+          runtime.neural.loading = false;
+        }
+        console.warn("Natural voice warm-up failed", error);
+      })
+      .finally(() => {
+        if (runtime.neural.warmupPromise === promise) {
+          runtime.neural.warmupPromise = null;
+        }
+      });
+    runtime.neural.warmupPromise = promise;
+    return promise;
   }
 
   async function prefetchNeuralSegment(index, prepareToken = 0) {
@@ -2730,7 +2797,7 @@
     if (!voiceKey || !shouldUseNeuralVoice(segment)) {
       return;
     }
-    if (prepareToken && prepareToken !== runtime.neural.prepareToken) {
+    if (prepareToken && prepareToken !== runtime.neural.prefetchToken) {
       return;
     }
 

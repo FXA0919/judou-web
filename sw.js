@@ -1,4 +1,4 @@
-const CACHE_NAME = "judou-shell-v2";
+const CACHE_NAME = "judou-shell-v3";
 const SHELL_FILES = [
   "./",
   "./index.html",
@@ -12,7 +12,7 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll(SHELL_FILES))
+      .then((cache) => Promise.allSettled(SHELL_FILES.map((file) => cacheFile(cache, file))))
       .then(() => self.skipWaiting()),
   );
 });
@@ -22,7 +22,11 @@ self.addEventListener("activate", (event) => {
     caches
       .keys()
       .then((keys) =>
-        Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))),
+        Promise.all(
+          keys
+            .filter((key) => key.startsWith("judou-shell-") && key !== CACHE_NAME)
+            .map((key) => caches.delete(key)),
+        ),
       )
       .then(() => self.clients.claim()),
   );
@@ -41,16 +45,18 @@ self.addEventListener("fetch", (event) => {
 
   if (request.mode === "navigate") {
     event.respondWith(
-      fetch(request)
-        .then((response) => {
-          const copy = response.clone();
-          void caches.open(CACHE_NAME).then((cache) => cache.put("./index.html", copy));
-          return response;
-        })
-        .catch(async () => {
-          const cached = await caches.match("./index.html");
-          return cached || Response.error();
-        }),
+      caches.match("./index.html").then((cached) => {
+        const network = fetch(request)
+          .then((response) => {
+            if (response.ok) {
+              const copy = response.clone();
+              void caches.open(CACHE_NAME).then((cache) => cache.put("./index.html", copy));
+            }
+            return response;
+          })
+          .catch(() => cached || Response.error());
+        return cached || network;
+      }),
     );
     return;
   }
@@ -70,3 +76,19 @@ self.addEventListener("fetch", (event) => {
     }),
   );
 });
+
+async function cacheFile(cache, file) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(file, {
+      cache: "reload",
+      signal: controller.signal,
+    });
+    if (response.ok) {
+      await cache.put(file, response);
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
