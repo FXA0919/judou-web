@@ -103,7 +103,7 @@
     repeat: 1,
     gap: 0.4,
     loopAll: false,
-    voiceURI: "neural:female",
+    voiceURI: "system:female",
     showTranslations: true,
   };
 
@@ -551,7 +551,9 @@
         : [],
     };
     if (!hydrated.settings.voiceURI) {
-      hydrated.settings.voiceURI = "neural:female";
+      hydrated.settings.voiceURI = "system:female";
+    } else if (isNeuralVoiceValue(hydrated.settings.voiceURI)) {
+      hydrated.settings.voiceURI = `system:${getNeuralVoiceKey(hydrated.settings.voiceURI)}`;
     }
     runtime.player.currentIndex = hydrated.segments.length ? 0 : -1;
     return hydrated;
@@ -2444,12 +2446,12 @@
       runtime.voices = window.speechSynthesis.getVoices() || [];
     }
 
-    const current = project.settings.voiceURI || "neural:female";
-    const neuralOptions = `
-      <optgroup label="自然语音">
-        <option value="neural:female">女生 · Heart</option>
-        <option value="neural:male">男声 · Michael</option>
-        <option value="neural:girl">少女 · Sky</option>
+    const current = project.settings.voiceURI || "system:female";
+    const modeOptions = `
+      <optgroup label="系统音色">
+        <option value="system:female">女生 · 系统语音</option>
+        <option value="system:male">男声 · 系统语音</option>
+        <option value="system:girl">少女 · 系统语音</option>
       </optgroup>
     `;
     const systemOptions = runtime.voices.length
@@ -2460,12 +2462,12 @@
           )
           .join("")}</optgroup>`
       : "";
-    dom.voiceSelect.innerHTML = `${neuralOptions}${systemOptions}`;
-    dom.voiceSelect.value = isNeuralVoiceValue(current)
+    dom.voiceSelect.innerHTML = `${modeOptions}${systemOptions}`;
+    dom.voiceSelect.value = isSystemVoiceMode(current)
       ? current
       : runtime.voices.some((voice) => voice.voiceURI === current)
         ? current
-        : "neural:female";
+        : "system:female";
     renderVoiceModuleSwitcher();
   }
 
@@ -2479,7 +2481,7 @@
   }
 
   function setVoiceModule(value) {
-    if (!isNeuralVoiceValue(value)) {
+    if (!isSystemVoiceMode(value)) {
       return;
     }
     stopPlayback();
@@ -2490,7 +2492,6 @@
     runtime.neural.prefetchToken += 1;
     renderVoiceModuleSwitcher();
     scheduleSave();
-    preloadNaturalVoice();
   }
 
   function syncControlsFromProject() {
@@ -2632,21 +2633,44 @@
 
   function speakSystemSegment(segment, token) {
     if (!hasSystemSpeech()) {
-      toast("当前浏览器不支持系统朗读，且自然语音尚未就绪", "warning");
+      toast("当前浏览器不支持系统语音朗读", "warning");
       stopPlayback();
       return;
     }
 
-    const utterance = new SpeechSynthesisUtterance(segment.text);
-    const voice = resolveVoice(segment.text);
+    const clauses = splitSpeechClauses(segment.text);
+    speakSystemClause(segment, token, clauses, 0);
+  }
+
+  function speakSystemClause(segment, token, clauses, index) {
+    if (token !== runtime.player.token || runtime.player.state !== "playing") {
+      return;
+    }
+
+    const clause = clauses[index];
+    const mode = getSystemVoiceMode(project.settings.voiceURI);
+    const utterance = new SpeechSynthesisUtterance(clause);
+    const voice = resolveVoice(segment.text, mode);
     utterance.voice = voice || null;
     utterance.lang = voice?.lang || speechLocaleForSegment(segment.text);
-    utterance.rate = clamp(Number(project.settings.rate) || 1, 0.5, 2);
-    const voiceKey = getNeuralVoiceKey(project.settings.voiceURI);
-    utterance.pitch = voiceKey === "girl" ? 1.14 : voiceKey === "male" ? 0.92 : 1;
+    const baseRate = clamp(Number(project.settings.rate) || 1, 0.5, 2);
+    utterance.rate = clamp(baseRate + ((index % 3) - 1) * 0.025, 0.5, 2);
+    utterance.pitch = clamp(getSystemPitch(mode) + (index % 2 ? 0.015 : -0.01), 0.5, 2);
     utterance.volume = 1;
 
-    utterance.onend = () => handleSegmentFinished(token);
+    utterance.onend = () => {
+      if (token !== runtime.player.token || runtime.player.state !== "playing") {
+        return;
+      }
+      if (index + 1 < clauses.length) {
+        runtime.player.timer = window.setTimeout(
+          () => speakSystemClause(segment, token, clauses, index + 1),
+          pauseAfterSpeech(clause),
+        );
+      } else {
+        handleSegmentFinished(token);
+      }
+    };
 
     utterance.onerror = (event) => {
       if (event.error === "canceled" || event.error === "interrupted") {
@@ -2658,6 +2682,60 @@
     };
 
     window.speechSynthesis.speak(utterance);
+  }
+
+  function splitSpeechClauses(text) {
+    const normalized = String(text || "").replace(/\s+/g, " ").trim();
+    if (!normalized) {
+      return [""];
+    }
+
+    const pieces =
+      normalized.match(/[^.!?;:，,；：]+[.!?;:，,；：]?/g)?.map((piece) => piece.trim()) || [];
+    if (pieces.length <= 1) {
+      return splitLongSpeechClause(normalized);
+    }
+    return pieces.flatMap((piece) => splitLongSpeechClause(piece));
+  }
+
+  function splitLongSpeechClause(text) {
+    const output = [];
+    let remaining = text.trim();
+    while (remaining.length > 165) {
+      let splitAt = remaining.lastIndexOf(" ", 150);
+      if (splitAt < 70) {
+        splitAt = 150;
+      }
+      output.push(remaining.slice(0, splitAt).trim());
+      remaining = remaining.slice(splitAt).trim();
+    }
+    if (remaining) {
+      output.push(remaining);
+    }
+    return output;
+  }
+
+  function pauseAfterSpeech(clause) {
+    if (/[.!?。？！]$/.test(clause)) {
+      return 180;
+    }
+    if (/[;:；：]$/.test(clause)) {
+      return 125;
+    }
+    if (/[,，、]$/.test(clause)) {
+      return 70;
+    }
+    return 45;
+  }
+
+  function getSystemPitch(mode) {
+    if (mode === "male") {
+      return 0.9;
+    }
+    if (mode === "girl") {
+      return 1.16;
+    }
+    return 1.02;
   }
 
   async function speakNeuralSegment(segment, token, voiceKeyOverride = "") {
@@ -2967,7 +3045,7 @@
     }
   }
 
-  function resolveVoice(text) {
+  function resolveVoice(text, modeOverride = "") {
     if (!runtime.voices.length && hasSystemSpeech()) {
       runtime.voices = window.speechSynthesis.getVoices() || [];
     }
@@ -2981,12 +3059,95 @@
 
     const locale = speechLocaleForSegment(text).toLowerCase();
     const base = locale.split("-")[0];
-    return (
-      runtime.voices.find((voice) => voice.lang.toLowerCase() === locale) ||
-      runtime.voices.find((voice) => voice.lang.toLowerCase().startsWith(`${base}-`)) ||
-      runtime.voices.find((voice) => voice.lang.toLowerCase() === base) ||
-      null
+    const mode = modeOverride || getSystemVoiceMode(project.settings.voiceURI);
+    const candidates = runtime.voices.filter((voice) => {
+      const voiceLang = voice.lang.toLowerCase();
+      return voiceLang === locale || voiceLang.startsWith(`${base}-`) || voiceLang === base;
+    });
+    if (!candidates.length) {
+      return null;
+    }
+
+    return candidates
+      .map((voice) => {
+        const voiceLang = voice.lang.toLowerCase();
+        const gender = classifySystemVoice(voice);
+        let score = 0;
+        if (voiceLang === locale) {
+          score += 30;
+        } else if (voiceLang.startsWith(`${base}-`)) {
+          score += 16;
+        }
+        if (mode === "male") {
+          score += gender === "male" ? 24 : gender === "female" ? -8 : 0;
+        } else if (mode === "female") {
+          score += gender === "female" ? 18 : gender === "male" ? -8 : 0;
+        } else if (mode === "girl") {
+          score += gender === "female" ? 22 : gender === "male" ? -10 : 0;
+        }
+        if (voice.localService) {
+          score += 1;
+        }
+        return { voice, score };
+      })
+      .sort((left, right) => right.score - left.score)[0].voice;
+  }
+
+  function classifySystemVoice(voice) {
+    const name = `${voice.name || ""} ${voice.voiceURI || ""}`.toLowerCase();
+    const maleHints = [
+      "david",
+      "mark",
+      "george",
+      "daniel",
+      "alex",
+      "fred",
+      "tom",
+      "james",
+      "guy",
+      "ryan",
+      "william",
+      "kangkang",
+      "yunxi",
+      "yunjian",
+      "male",
+      "男",
+    ];
+    const femaleHints = [
+      "zira",
+      "hazel",
+      "samantha",
+      "victoria",
+      "aria",
+      "jenny",
+      "huihui",
+      "yaoyao",
+      "xiaoxiao",
+      "xiaoyi",
+      "tingting",
+      "susan",
+      "karen",
+      "moira",
+      "fiona",
+      "tessa",
+      "female",
+      "女",
+    ];
+    const maleScore = maleHints.reduce(
+      (score, hint) => score + (name.includes(hint) ? 1 : 0),
+      0,
     );
+    const femaleScore = femaleHints.reduce(
+      (score, hint) => score + (name.includes(hint) ? 1 : 0),
+      0,
+    );
+    if (maleScore > femaleScore) {
+      return "male";
+    }
+    if (femaleScore > maleScore) {
+      return "female";
+    }
+    return "";
   }
 
   function setRate(rate) {
@@ -3062,6 +3223,15 @@
 
   function isNeuralVoiceValue(value) {
     return /^neural:(female|male|girl)$/.test(String(value || ""));
+  }
+
+  function isSystemVoiceMode(value) {
+    return /^system:(female|male|girl)$/.test(String(value || ""));
+  }
+
+  function getSystemVoiceMode(value) {
+    const match = /^system:(female|male|girl)$/.exec(String(value || ""));
+    return match ? match[1] : "";
   }
 
   function getNeuralVoiceKey(value) {
