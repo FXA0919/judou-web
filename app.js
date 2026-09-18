@@ -1603,9 +1603,12 @@
   function preloadGrammarModel() {
     if (!runtime.grammar.preloadPromise) {
       runtime.grammar.preloadPromise = import(
-        "./harper-runtime.bundle.mjs?v=grammar-v15"
+        "./harper-runtime.bundle.mjs?v=grammar-v17"
       )
-        .then((grammar) => grammar.warmUpHarperGrammar())
+        .then(async (grammar) => {
+          await grammar.warmUpHarperGrammar();
+          return grammar;
+        })
         .catch((error) => {
           runtime.grammar.preloadPromise = null;
           throw error;
