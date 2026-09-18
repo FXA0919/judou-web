@@ -1066,6 +1066,57 @@ textarea:hover,
   border-color: #cde5df;
 }
 
+.grammar-change-summary {
+  padding: 7px 9px;
+  color: var(--muted);
+  font-size: 11px;
+  background: #f5f8fd;
+  border: 1px solid #d9e4f3;
+  border-radius: var(--radius-sm);
+}
+
+.grammar-change-summary summary {
+  color: #315f9d;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.grammar-change-summary ul {
+  display: grid;
+  gap: 5px;
+  margin: 7px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.grammar-change-summary li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.grammar-change-summary li span {
+  color: #9b4b42;
+  text-decoration: line-through;
+}
+
+.grammar-change-summary li strong {
+  color: #2f6b55;
+}
+
+.grammar-change-summary li svg {
+  width: 13px;
+  height: 13px;
+}
+
+.grammar-change-summary li em {
+  margin-left: auto;
+  color: #6e7f9d;
+  font-size: 10px;
+  font-style: normal;
+}
+
 .segment-footer {
   display: flex;
   align-items: center;

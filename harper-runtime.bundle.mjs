@@ -3042,8 +3042,8 @@ function pMemoize(fn, { cacheKey = ([firstArgument]) => firstArgument, cache = /
   cacheStore.set(memoized, cache);
   return memoized;
 }
-function inferGlueFlavor(binary2) {
-  return binary2.includes("harper_wasm_slim") ? "slim" : "full";
+function inferGlueFlavor(binary) {
+  return binary.includes("harper_wasm_slim") ? "slim" : "full";
 }
 function loadGlue(glueFlavor) {
   if (glueFlavor === "slim") {
@@ -3051,31 +3051,31 @@ function loadGlue(glueFlavor) {
   }
   return fullGlue;
 }
-function getDefaultGlueBinary(binary2, glueFlavor) {
+function getDefaultGlueBinary(binary, glueFlavor) {
   if (glueFlavor === "slim") {
-    return binary2;
+    return binary;
   }
-  if (binary2.includes("harper_wasm_bg.wasm")) {
-    return binary2.replace("harper_wasm_bg.wasm", "harper_wasm_slim_bg.wasm");
+  if (binary.includes("harper_wasm_bg.wasm")) {
+    return binary.replace("harper_wasm_bg.wasm", "harper_wasm_slim_bg.wasm");
   }
   return null;
 }
-function getInitInput(binary2) {
-  if (typeof process !== "undefined" && binary2.startsWith("file://")) {
+function getInitInput(binary) {
+  if (typeof process !== "undefined" && binary.startsWith("file://")) {
     return Promise.resolve().then(() => (init_fs(), fs_exports)).then(
       (fs) => new Promise((resolve, reject) => {
-        fs.readFile(new URL(binary2).pathname, (err, data) => {
+        fs.readFile(new URL(binary).pathname, (err, data) => {
           if (err) reject(err);
           resolve(data);
         });
       })
     );
   }
-  return binary2;
+  return binary;
 }
-async function loadBinaryUncached(binary2, glueFlavor) {
+async function loadBinaryUncached(binary, glueFlavor) {
   const exports = loadGlue(glueFlavor);
-  const defaultGlueBinary = getDefaultGlueBinary(binary2, glueFlavor);
+  const defaultGlueBinary = getDefaultGlueBinary(binary, glueFlavor);
   if (defaultGlueBinary != null) {
     try {
       await __wbg_init$1({ module_or_path: getInitInput(defaultGlueBinary) });
@@ -3085,15 +3085,15 @@ async function loadBinaryUncached(binary2, glueFlavor) {
       }
     }
   }
-  await exports.default({ module_or_path: getInitInput(binary2) });
+  await exports.default({ module_or_path: getInitInput(binary) });
   return exports;
 }
 var loadBinaryByFlavor = {
-  full: pMemoize((binary2) => loadBinaryUncached(binary2, "full")),
-  slim: pMemoize((binary2) => loadBinaryUncached(binary2, "slim"))
+  full: pMemoize((binary) => loadBinaryUncached(binary, "full")),
+  slim: pMemoize((binary) => loadBinaryUncached(binary, "slim"))
 };
-function loadBinary(binary2, glueFlavor) {
-  return loadBinaryByFlavor[glueFlavor](binary2);
+function loadBinary(binary, glueFlavor) {
+  return loadBinaryByFlavor[glueFlavor](binary);
 }
 function createBinaryModuleFromUrl(url, glueFlavor) {
   return BinaryModuleImpl.create(url, glueFlavor);
@@ -3493,19 +3493,49 @@ try {
 }
 
 // ../../outputs/read-along-web/harper-grammar.mjs
-var binary = createBinaryModuleFromUrl(
-  new URL("./vendor/harper/harper_wasm_bg.wasm", import.meta.url).href,
-  "full"
+var base = new URL("./", import.meta.url);
+var wasmUrl = new URL("./vendor/harper/harper_wasm_bg.wasm", import.meta.url).href;
+var chunkVersion = "45831d47694ee8f2da6a691c099ba8d6be637e5367434e4e8333498cf6ec10fc";
+var chunkParts = [
+  { name: "harper_wasm_bg.wasm.gz.part0", bytes: 2716561 },
+  { name: "harper_wasm_bg.wasm.gz.part1", bytes: 2716561 },
+  { name: "harper_wasm_bg.wasm.gz.part2", bytes: 2716561 }
+];
+var chunkHosts = [
+  "https://gcore.jsdelivr.net/gh/FXA0919/judou-web@main/",
+  "https://cdn.jsdelivr.net/gh/FXA0919/judou-web@main/",
+  "https://fastly.jsdelivr.net/gh/FXA0919/judou-web@main/"
+];
+var autoFixKinds = /* @__PURE__ */ new Set([
+  "Agreement",
+  "BoundaryError",
+  "Capitalization",
+  "Grammar",
+  "Miscellaneous",
+  "Punctuation",
+  "Spelling",
+  "Typo",
+  "WordOrder"
+]);
+var preferLocalModel = Boolean(
+  globalThis.Capacitor?.isNativePlatform?.() || globalThis.Capacitor?.getPlatform?.() === "android" || globalThis.androidBridge || typeof location !== "undefined" && location.search.includes("desktop=1")
 );
+var originalFetch = globalThis.fetch.bind(globalThis);
 var linterPromise = null;
+var activeStageCallback = () => {
+};
 function isHarperGrammarAvailable() {
   return true;
 }
 async function warmUpHarperGrammar(onStage = () => {
 }) {
   if (!linterPromise) {
-    onStage("\u52A0\u8F7D\u672C\u5730\u8BED\u6CD5\u6A21\u578B");
+    activeStageCallback = typeof onStage === "function" ? onStage : () => {
+    };
     linterPromise = (async () => {
+      onStage("\u52A0\u8F7D\u672C\u5730\u8BED\u6CD5\u6A21\u578B");
+      const binaryUrl = await resolveWasmUrl();
+      const binary = createBinaryModuleFromUrl(binaryUrl, "full");
       const linter = new LocalLinter({ binary });
       await linter.setup();
       return linter;
@@ -3516,7 +3546,71 @@ async function warmUpHarperGrammar(onStage = () => {
   }
   return linterPromise;
 }
-async function correctEnglishText(source, { maxPasses = 2, maxChanges = 60 } = {}) {
+async function resolveWasmUrl() {
+  if (preferLocalModel || !("DecompressionStream" in globalThis)) {
+    return wasmUrl;
+  }
+  try {
+    const buffer = await fetchCompressedWasm();
+    const blobUrl = URL.createObjectURL(
+      new Blob([buffer], { type: "application/wasm" })
+    );
+    return blobUrl;
+  } catch (error) {
+    activeStageCallback("\u52A0\u901F\u6E90\u4E0D\u53EF\u7528\uFF0C\u5207\u6362\u672C\u5730\u8BED\u6CD5\u6A21\u578B");
+    return wasmUrl;
+  }
+}
+async function fetchCompressedWasm() {
+  let received = 0;
+  const gzipSize = chunkParts.reduce((sum, part) => sum + part.bytes, 0);
+  const parts = await Promise.all(
+    chunkParts.map(
+      (part) => fetchChunkPart(part).then((buffer) => {
+        received += buffer.byteLength;
+        const percent = Math.min(100, Math.round(received / gzipSize * 100));
+        activeStageCallback(`\u52A0\u8F7D\u8BED\u6CD5\u6A21\u578B ${percent}%`);
+        return new Uint8Array(buffer);
+      })
+    )
+  );
+  const merged = new Uint8Array(gzipSize);
+  let offset = 0;
+  parts.forEach((part) => {
+    merged.set(part, offset);
+    offset += part.byteLength;
+  });
+  activeStageCallback("\u6B63\u5728\u89E3\u538B\u8BED\u6CD5\u6A21\u578B");
+  const stream = new Blob([merged.buffer]).stream().pipeThrough(new DecompressionStream("gzip"));
+  const output = await new Response(stream).arrayBuffer();
+  if (output.byteLength < 16e6) {
+    throw new Error("Grammar model is incomplete");
+  }
+  return output;
+}
+async function fetchChunkPart(part) {
+  const relative = `vendor/harper/chunks/${part.name}?v=${chunkVersion}`;
+  const urls = chunkHosts.map((host) => `${host}${relative}`);
+  urls.push(new URL(`vendor/harper/chunks/${part.name}`, base).href);
+  let lastError = null;
+  for (const url of urls) {
+    try {
+      const response = await originalFetch(url, { cache: "force-cache" });
+      if (!response.ok) {
+        throw new Error(`Grammar chunk request failed: ${response.status}`);
+      }
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength !== part.bytes) {
+        throw new Error(`Grammar chunk size mismatch: ${part.name}`);
+      }
+      return buffer;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error(`Unable to fetch ${part.name}`);
+}
+async function correctEnglishText(source, { maxPasses = 2, maxChanges = 60, conservative = true } = {}) {
   const original = String(source || "").trim();
   if (!looksEnglish(original)) {
     return { text: original, changes: [], changed: false };
@@ -3526,7 +3620,12 @@ async function correctEnglishText(source, { maxPasses = 2, maxChanges = 60 } = {
   const changes = [];
   for (let pass = 0; pass < maxPasses; pass += 1) {
     const lints = await linter.lint(current, { language: "plaintext" });
-    const fixes = collectSafeFixes(current, lints, maxChanges - changes.length);
+    const fixes = collectSafeFixes(
+      current,
+      lints,
+      maxChanges - changes.length,
+      conservative
+    );
     if (!fixes.length) {
       break;
     }
@@ -3535,7 +3634,8 @@ async function correctEnglishText(source, { maxPasses = 2, maxChanges = 60 } = {
       changes.push({
         before: fix.before,
         after: fix.replacement,
-        message: fix.message
+        message: fix.message,
+        kind: fix.kind
       });
     });
   }
@@ -3545,7 +3645,7 @@ async function correctEnglishText(source, { maxPasses = 2, maxChanges = 60 } = {
     changed: current !== original
   };
 }
-function collectSafeFixes(text, lints, remaining) {
+function collectSafeFixes(text, lints, remaining, conservative) {
   if (remaining <= 0) {
     return [];
   }
@@ -3555,15 +3655,27 @@ function collectSafeFixes(text, lints, remaining) {
     if (!suggestions.length) {
       continue;
     }
+    const kind = lint.lint_kind();
+    if (conservative && !autoFixKinds.has(kind)) {
+      continue;
+    }
     const span = lint.span();
     const start = Math.max(0, Number(span.start) || 0);
     const end = Math.max(start, Number(span.end) || start);
     const before = text.slice(start, end);
     const message = lint.message();
     for (const suggestion of suggestions) {
-      const kind = suggestion.kind();
+      const suggestionKind = suggestion.kind();
       const replacement = suggestion.get_replacement_text();
-      if (!isSafeFix({ text, start, end, before, replacement, kind, message })) {
+      if (!isSafeFix({
+        text,
+        start,
+        end,
+        before,
+        replacement,
+        kind: suggestionKind,
+        message
+      })) {
         continue;
       }
       candidates.push({
@@ -3571,7 +3683,8 @@ function collectSafeFixes(text, lints, remaining) {
         end,
         before,
         replacement,
-        message
+        message,
+        kind
       });
       break;
     }

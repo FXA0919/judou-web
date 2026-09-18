@@ -997,15 +997,21 @@
       }
       project.text = fullText;
       rebuildSegments(fullText);
-      if (project.settings.grammarCheck) {
-        await correctSegmentGrammar({ force: true, silent: true });
-      }
       await commitSave();
       switchView("review");
       const engineLabel = engine === "paddle" ? "PaddleOCR" : "Tesseract";
       toast(`${engineLabel} 识别完成，共 ${project.segments.length} 句`, "success");
 
-      if (project.settings.autoTranslate && !isChineseSource(project.settings.ocrLanguage)) {
+      if (project.settings.grammarCheck) {
+        void correctSegmentGrammar({
+          force: true,
+          silent: true,
+          translateAfter: true,
+        }).finally(() => warmUpNaturalVoice());
+      } else if (
+        project.settings.autoTranslate &&
+        !isChineseSource(project.settings.ocrLanguage)
+      ) {
         translateMissingSegments().finally(() => warmUpNaturalVoice());
       } else {
         warmUpNaturalVoice();
@@ -1510,7 +1516,8 @@
     try {
       await assertLocalService();
       const grammar = await import("./harper-runtime.bundle.mjs");
-      for (const segment of targets) {
+      for (let index = 0; index < targets.length; index += 1) {
+        const segment = targets[index];
         if (token !== runtime.grammar.token || !runtime.grammar.active) {
           break;
         }
@@ -1530,13 +1537,15 @@
         runtime.grammar.completed += 1;
         updateGrammarProgress();
         updateSegmentTextInput(segment);
-        await sleep(10);
+        if ((index + 1) % 8 === 0) {
+          await sleep(0);
+        }
       }
 
       const wasStopped = token !== runtime.grammar.token || !runtime.grammar.active;
       runtime.grammar.active = false;
       dom.grammarStatus.hidden = true;
-      dom.grammarButtonLabel.textContent = "语法校对";
+      dom.grammarButtonLabel.textContent = "保守校对";
       project.text = project.segments.map((segment) => segment.text).join("\n");
       renderReview();
       renderListenList();
@@ -1544,13 +1553,13 @@
 
       if (!silent) {
         if (wasStopped) {
-          toast("语法校对已停止", "warning");
+          toast("保守校对已停止", "warning");
         } else {
           const corrected = project.segments.filter(
             (segment) => segment.corrections.length,
           ).length;
           toast(
-            corrected ? `语法校对完成，修正 ${corrected} 句` : "语法校对完成，未发现需要修正的内容",
+            corrected ? `保守校对完成，修正 ${corrected} 句` : "保守校对完成，未发现需要修正的内容",
             "success",
           );
         }
@@ -1561,13 +1570,13 @@
         project.settings.autoTranslate &&
         !isChineseSource(project.settings.ocrLanguage)
       ) {
-        translateMissingSegments();
+        await translateMissingSegments();
       }
     } catch (error) {
       console.warn("Harper grammar correction failed", error);
       runtime.grammar.active = false;
       dom.grammarStatus.hidden = true;
-      dom.grammarButtonLabel.textContent = "语法校对";
+      dom.grammarButtonLabel.textContent = "保守校对";
       if (!silent) {
         toast(
           String(error?.message || "").includes("LOCAL_SERVICE_DOWN")
@@ -2222,6 +2231,22 @@
                 placeholder="中文译文"
                 aria-label="第 ${index + 1} 句译文"
               >${escapeHtml(segment.translation || "")}</textarea>
+              ${
+                hasGrammarChanges
+                  ? `<details class="grammar-change-summary">
+                      <summary>已保守修正 ${segment.corrections.length} 处</summary>
+                      <ul>
+                        ${segment.corrections
+                          .slice(0, 8)
+                          .map(
+                            (item) =>
+                              `<li><span>${escapeHtml(item.before || "（空）")}</span><i data-lucide="arrow-right"></i><strong>${escapeHtml(item.after || "删除")}</strong>${item.kind ? `<em>${escapeHtml(item.kind)}</em>` : ""}</li>`,
+                          )
+                          .join("")}
+                      </ul>
+                    </details>`
+                  : ""
+              }
               <div class="segment-footer">
                 <button class="mini-button" type="button" data-segment-id="${escapeAttribute(segment.id)}" data-segment-action="play">
                   <i data-lucide="play"></i>
@@ -2274,7 +2299,7 @@
     dom.segmentCount.textContent = String(project.segments.length);
     dom.translatedCount.textContent = String(translated);
     dom.grammarCount.textContent = String(corrected);
-    dom.grammarButtonLabel.textContent = runtime.grammar.active ? "停止校对" : "语法校对";
+    dom.grammarButtonLabel.textContent = runtime.grammar.active ? "停止校对" : "保守校对";
     dom.translateButtonLabel.textContent = runtime.translation.active ? "停止翻译" : "自动翻译";
   }
 

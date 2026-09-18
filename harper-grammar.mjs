@@ -1,7 +1,43 @@
-import { LocalLinter, SuggestionKind } from "./vendor/harper/index.js";
-import { binary } from "./vendor/harper/binary.js";
+import {
+  LocalLinter,
+  SuggestionKind,
+  createBinaryModuleFromUrl,
+} from "./vendor/harper/index.js";
+
+const base = new URL("./", import.meta.url);
+const wasmUrl = new URL("./vendor/harper/harper_wasm_bg.wasm", import.meta.url).href;
+const chunkVersion = "45831d47694ee8f2da6a691c099ba8d6be637e5367434e4e8333498cf6ec10fc";
+const chunkParts = [
+  { name: "harper_wasm_bg.wasm.gz.part0", bytes: 2716561 },
+  { name: "harper_wasm_bg.wasm.gz.part1", bytes: 2716561 },
+  { name: "harper_wasm_bg.wasm.gz.part2", bytes: 2716561 },
+];
+const chunkHosts = [
+  "https://gcore.jsdelivr.net/gh/FXA0919/judou-web@main/",
+  "https://cdn.jsdelivr.net/gh/FXA0919/judou-web@main/",
+  "https://fastly.jsdelivr.net/gh/FXA0919/judou-web@main/",
+];
+const autoFixKinds = new Set([
+  "Agreement",
+  "BoundaryError",
+  "Capitalization",
+  "Grammar",
+  "Miscellaneous",
+  "Punctuation",
+  "Spelling",
+  "Typo",
+  "WordOrder",
+]);
+const preferLocalModel = Boolean(
+  globalThis.Capacitor?.isNativePlatform?.() ||
+    globalThis.Capacitor?.getPlatform?.() === "android" ||
+    globalThis.androidBridge ||
+    (typeof location !== "undefined" && location.search.includes("desktop=1")),
+);
+const originalFetch = globalThis.fetch.bind(globalThis);
 
 let linterPromise = null;
+let activeStageCallback = () => {};
 
 export function isHarperGrammarAvailable() {
   return true;
@@ -9,8 +45,11 @@ export function isHarperGrammarAvailable() {
 
 export async function warmUpHarperGrammar(onStage = () => {}) {
   if (!linterPromise) {
-    onStage("加载本地语法模型");
+    activeStageCallback = typeof onStage === "function" ? onStage : () => {};
     linterPromise = (async () => {
+      onStage("加载本地语法模型");
+      const binaryUrl = await resolveWasmUrl();
+      const binary = createBinaryModuleFromUrl(binaryUrl, "full");
       const linter = new LocalLinter({ binary });
       await linter.setup();
       return linter;
@@ -22,9 +61,79 @@ export async function warmUpHarperGrammar(onStage = () => {}) {
   return linterPromise;
 }
 
+async function resolveWasmUrl() {
+  if (preferLocalModel || !("DecompressionStream" in globalThis)) {
+    return wasmUrl;
+  }
+  try {
+    const buffer = await fetchCompressedWasm();
+    const blobUrl = URL.createObjectURL(
+      new Blob([buffer], { type: "application/wasm" }),
+    );
+    return blobUrl;
+  } catch (error) {
+    activeStageCallback("加速源不可用，切换本地语法模型");
+    return wasmUrl;
+  }
+}
+
+async function fetchCompressedWasm() {
+  let received = 0;
+  const gzipSize = chunkParts.reduce((sum, part) => sum + part.bytes, 0);
+  const parts = await Promise.all(
+    chunkParts.map((part) =>
+      fetchChunkPart(part).then((buffer) => {
+        received += buffer.byteLength;
+        const percent = Math.min(100, Math.round((received / gzipSize) * 100));
+        activeStageCallback(`加载语法模型 ${percent}%`);
+        return new Uint8Array(buffer);
+      }),
+    ),
+  );
+  const merged = new Uint8Array(gzipSize);
+  let offset = 0;
+  parts.forEach((part) => {
+    merged.set(part, offset);
+    offset += part.byteLength;
+  });
+  activeStageCallback("正在解压语法模型");
+  const stream = new Blob([merged.buffer])
+    .stream()
+    .pipeThrough(new DecompressionStream("gzip"));
+  const output = await new Response(stream).arrayBuffer();
+  if (output.byteLength < 16000000) {
+    throw new Error("Grammar model is incomplete");
+  }
+  return output;
+}
+
+async function fetchChunkPart(part) {
+  const relative = `vendor/harper/chunks/${part.name}?v=${chunkVersion}`;
+  const urls = chunkHosts.map((host) => `${host}${relative}`);
+  urls.push(new URL(`vendor/harper/chunks/${part.name}`, base).href);
+  let lastError = null;
+
+  for (const url of urls) {
+    try {
+      const response = await originalFetch(url, { cache: "force-cache" });
+      if (!response.ok) {
+        throw new Error(`Grammar chunk request failed: ${response.status}`);
+      }
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength !== part.bytes) {
+        throw new Error(`Grammar chunk size mismatch: ${part.name}`);
+      }
+      return buffer;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error(`Unable to fetch ${part.name}`);
+}
+
 export async function correctEnglishText(
   source,
-  { maxPasses = 2, maxChanges = 60 } = {},
+  { maxPasses = 2, maxChanges = 60, conservative = true } = {},
 ) {
   const original = String(source || "").trim();
   if (!looksEnglish(original)) {
@@ -37,7 +146,12 @@ export async function correctEnglishText(
 
   for (let pass = 0; pass < maxPasses; pass += 1) {
     const lints = await linter.lint(current, { language: "plaintext" });
-    const fixes = collectSafeFixes(current, lints, maxChanges - changes.length);
+    const fixes = collectSafeFixes(
+      current,
+      lints,
+      maxChanges - changes.length,
+      conservative,
+    );
     if (!fixes.length) {
       break;
     }
@@ -50,6 +164,7 @@ export async function correctEnglishText(
           before: fix.before,
           after: fix.replacement,
           message: fix.message,
+          kind: fix.kind,
         });
       });
   }
@@ -61,7 +176,7 @@ export async function correctEnglishText(
   };
 }
 
-function collectSafeFixes(text, lints, remaining) {
+function collectSafeFixes(text, lints, remaining, conservative) {
   if (remaining <= 0) {
     return [];
   }
@@ -73,6 +188,11 @@ function collectSafeFixes(text, lints, remaining) {
       continue;
     }
 
+    const kind = lint.lint_kind();
+    if (conservative && !autoFixKinds.has(kind)) {
+      continue;
+    }
+
     const span = lint.span();
     const start = Math.max(0, Number(span.start) || 0);
     const end = Math.max(start, Number(span.end) || start);
@@ -80,9 +200,19 @@ function collectSafeFixes(text, lints, remaining) {
     const message = lint.message();
 
     for (const suggestion of suggestions) {
-      const kind = suggestion.kind();
+      const suggestionKind = suggestion.kind();
       const replacement = suggestion.get_replacement_text();
-      if (!isSafeFix({ text, start, end, before, replacement, kind, message })) {
+      if (
+        !isSafeFix({
+          text,
+          start,
+          end,
+          before,
+          replacement,
+          kind: suggestionKind,
+          message,
+        })
+      ) {
         continue;
       }
 
@@ -92,6 +222,7 @@ function collectSafeFixes(text, lints, remaining) {
         before,
         replacement,
         message,
+        kind,
       });
       break;
     }

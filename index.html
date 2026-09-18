@@ -9,7 +9,7 @@
     />
     <title>句读</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%231d2525%22/><path d=%22M20 20h24v6H20zm0 12h24v6H20zm0 12h15v6H20z%22 fill=%22%23f8f4ea%22/><circle cx=%2244%22 cy=%2244%22 r=%228%22 fill=%22%23e85b3f%22/></svg>" />
-    <link rel="stylesheet" href="./styles.css?v=natural-tts-v14" />
+    <link rel="stylesheet" href="./styles.css?v=grammar-v15" />
     <script type="importmap">
       {
         "imports": {
@@ -20,8 +20,8 @@
       }
     </script>
     <script defer src="./vendor/lucide/lucide.min.js"></script>
-    <script defer src="./text-engine.js?v=natural-tts-v14"></script>
-    <script defer src="./app.js?v=natural-tts-v14"></script>
+    <script defer src="./text-engine.js?v=grammar-v15"></script>
+    <script defer src="./app.js?v=grammar-v15"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -176,8 +176,8 @@
 
                 <label class="switch-row" for="grammarCheck">
                   <span>
-                    <strong>语法校对</strong>
-                    <small>先修正英文语法，再生成译文</small>
+                    <strong>保守校对</strong>
+                    <small>只自动修正拼写、标点和语法，保留原文可回退</small>
                   </span>
                   <input id="grammarCheck" type="checkbox" checked />
                   <span class="switch" aria-hidden="true"></span>
@@ -253,7 +253,7 @@
               <div class="summary-spacer"></div>
               <button class="button button-secondary" id="grammarReviewBtn" type="button">
                 <i data-lucide="badge-check"></i>
-                <span id="grammarButtonLabel">语法校对</span>
+                <span id="grammarButtonLabel">保守校对</span>
               </button>
               <button class="button button-secondary" id="translateBtn" type="button">
                 <i data-lucide="wand-sparkles"></i>
@@ -263,7 +263,7 @@
 
             <div class="translation-status grammar-status" id="grammarStatus" hidden>
               <div class="progress-copy">
-                <span id="grammarStatusLabel">正在校对语法</span>
+                <span id="grammarStatusLabel">正在保守校对</span>
                 <span id="grammarStatusValue"></span>
               </div>
               <div class="progress-track">

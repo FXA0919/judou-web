@@ -1,0 +1,24 @@
+{
+  "rawBytes": 16164077,
+  "gzipBytes": 8149683,
+  "chunkCount": 3,
+  "chunkSize": 2716561,
+  "sha256": "45831d47694ee8f2da6a691c099ba8d6be637e5367434e4e8333498cf6ec10fc",
+  "parts": [
+    {
+      "name": "harper_wasm_bg.wasm.gz.part0",
+      "bytes": 2716561,
+      "sha256": "edb44bbd4bafb82cb54d0b95bf30edbe1b6b5e59abdcc0afc02793bc5f00af6b"
+    },
+    {
+      "name": "harper_wasm_bg.wasm.gz.part1",
+      "bytes": 2716561,
+      "sha256": "a0676d8b268100c38121ab8dce66af09f9bfeaa9cf1898243ad1d200f951dad2"
+    },
+    {
+      "name": "harper_wasm_bg.wasm.gz.part2",
+      "bytes": 2716561,
+      "sha256": "db2686e0e3064a306b4fc17fd8e92d17994477ca282c87ce7f155371bfee2721"
+    }
+  ]
+}
