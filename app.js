@@ -134,6 +134,7 @@
       token: 0,
       completed: 0,
       total: 0,
+      preloadPromise: null,
     },
     neural: {
       modulePromise: null,
@@ -959,6 +960,9 @@
     runtime.ocr.active = true;
     runtime.ocr.pageCount = project.pages.length;
     runtime.ocr.localProgress = 0;
+    if (project.settings.grammarCheck) {
+      void preloadGrammarModel();
+    }
     dom.processBtn.disabled = true;
     dom.processBtn.querySelector("span").textContent = "正在识别";
     setOCRProgress(0, "准备识别");
@@ -1515,7 +1519,7 @@
 
     try {
       await assertLocalService();
-      const grammar = await import("./harper-runtime.bundle.mjs?v=grammar-v15");
+      const grammar = await preloadGrammarModel();
       for (let index = 0; index < targets.length; index += 1) {
         const segment = targets[index];
         if (token !== runtime.grammar.token || !runtime.grammar.active) {
@@ -1594,6 +1598,20 @@
       : 0;
     dom.grammarStatusValue.textContent = `${runtime.grammar.completed} / ${runtime.grammar.total}`;
     dom.grammarProgressBar.style.width = `${Math.round(progress * 100)}%`;
+  }
+
+  function preloadGrammarModel() {
+    if (!runtime.grammar.preloadPromise) {
+      runtime.grammar.preloadPromise = import(
+        "./harper-runtime.bundle.mjs?v=grammar-v15"
+      )
+        .then((grammar) => grammar.warmUpHarperGrammar())
+        .catch((error) => {
+          runtime.grammar.preloadPromise = null;
+          throw error;
+        });
+    }
+    return runtime.grammar.preloadPromise;
   }
 
   function updateSegmentTextInput(segment) {
