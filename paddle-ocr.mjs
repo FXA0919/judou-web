@@ -1,4 +1,5 @@
-import * as ort from "onnxruntime-web";
+const runtimeBundle = await import("./paddle-runtime.bundle.mjs");
+const { ort, PaddleOcrService } = runtimeBundle;
 
 const appBase = new URL("./", import.meta.url);
 
@@ -6,8 +7,6 @@ ort.env.wasm.wasmPaths = new URL("vendor/onnxruntime-web/dist/", appBase).href;
 ort.env.wasm.numThreads = 1;
 ort.env.wasm.proxy = false;
 ort.env.logLevel = "error";
-
-const { PaddleOcrService } = await import("./vendor/ppu-paddle-ocr/web/index.js");
 
 const modelBase = new URL("vendor/paddle-models/", appBase).href;
 const englishModelBase = new URL("vendor/paddle-models/en/", appBase).href;
