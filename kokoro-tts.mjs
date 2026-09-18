@@ -16,6 +16,12 @@ const chunkHosts = [
   "https://cdn.jsdelivr.net/gh/FXA0919/judou-web@main/",
   "https://fastly.jsdelivr.net/gh/FXA0919/judou-web@main/",
 ];
+const preferLocalModel = Boolean(
+  globalThis.Capacitor?.isNativePlatform?.() ||
+    globalThis.Capacitor?.getPlatform?.() === "android" ||
+    globalThis.androidBridge ||
+    (typeof location !== "undefined" && location.search.includes("desktop=1")),
+);
 
 const localModelFiles = new Map([
   ["config.json", "vendor/kokoro/model/config.json"],
@@ -43,18 +49,19 @@ globalThis.fetch = async (input, init) => {
       const localUrl = new URL(localFile, base).href;
       if (parallelModelSizes.has(localFile)) {
         const mirrorUrl = `${mirrorPrefix}${relative}`;
+        const chunkSource = {
+          mode: "gzip-chunks",
+          label: "国内 CDN 加速",
+          parts: chunkParts,
+          hosts: chunkHosts,
+          gzipSize: chunkParts.reduce((sum, part) => sum + part.bytes, 0),
+        };
+        const localSource = { url: localUrl, mode: "ranges", label: "本地应用文件" };
+        const mirrorSource = { url: mirrorUrl, mode: "direct", label: "国内镜像" };
         return fetchModelFromSources(
-          [
-            {
-              mode: "gzip-chunks",
-              label: "国内 CDN 加速",
-              parts: chunkParts,
-              hosts: chunkHosts,
-              gzipSize: chunkParts.reduce((sum, part) => sum + part.bytes, 0),
-            },
-            { url: localUrl, mode: "ranges", label: "GitHub Pages" },
-            { url: mirrorUrl, mode: "direct", label: "国内镜像" },
-          ],
+          preferLocalModel
+            ? [localSource, chunkSource, mirrorSource]
+            : [chunkSource, localSource, mirrorSource],
           localUrl,
           parallelModelSizes.get(localFile),
           init,
