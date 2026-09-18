@@ -13,6 +13,7 @@
   const OCR_RUNTIME_MODULES = [
     "./paddle-ocr.mjs",
     "./paddle-runtime.bundle.mjs",
+    "./harper-runtime.bundle.mjs",
   ];
 
   const LANGUAGE_INFO = {
@@ -1483,7 +1484,7 @@
 
     try {
       await assertLocalService();
-      const grammar = await import("./harper-grammar.mjs");
+      const grammar = await import("./harper-runtime.bundle.mjs");
       for (const segment of targets) {
         if (token !== runtime.grammar.token || !runtime.grammar.active) {
           break;
