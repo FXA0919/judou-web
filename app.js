@@ -472,7 +472,7 @@
       commitSave();
       releasePreviewObjectUrl();
       releaseNeuralAudio();
-      if ("speechSynthesis" in window) {
+      if (hasSystemSpeech()) {
         window.speechSynthesis.cancel();
       }
       runtime.ocr.worker?.terminate();
@@ -2381,7 +2381,7 @@
   }
 
   function setupVoices() {
-    if (!("speechSynthesis" in window)) {
+    if (!hasSystemSpeech()) {
       return;
     }
     const refresh = () => {
@@ -2394,7 +2394,7 @@
   }
 
   function renderVoiceOptions() {
-    if (!runtime.voices.length && "speechSynthesis" in window) {
+    if (!runtime.voices.length && hasSystemSpeech()) {
       runtime.voices = window.speechSynthesis.getVoices() || [];
     }
 
@@ -2526,9 +2526,18 @@
       return;
     }
 
-    if (shouldUseNeuralVoice(segment) && runtime.neural.ready) {
+    const systemSpeechAvailable = hasSystemSpeech();
+    const englishNeuralFallback =
+      !systemSpeechAvailable && detectSentenceSource(segment.text) === "eng";
+    const useNeuralForSegment = shouldUseNeuralVoice(segment) || englishNeuralFallback;
+
+    if (useNeuralForSegment && (!systemSpeechAvailable || runtime.neural.ready)) {
       try {
-        await speakNeuralSegment(segment, token);
+        await speakNeuralSegment(
+          segment,
+          token,
+          getNeuralVoiceKey(project.settings.voiceURI) || "female",
+        );
         return;
       } catch (error) {
         if (token !== runtime.player.token) {
@@ -2537,8 +2546,17 @@
         runtime.neural.generating = false;
         document.documentElement.dataset.neuralPlayback = "failed";
         document.documentElement.dataset.neuralError = String(error?.message || error || "");
-        console.warn("Natural speech failed, using system speech", error);
-        toast("自然语音生成失败，已切换系统语音", "warning");
+        console.warn("Natural speech failed", error);
+        toast(
+          systemSpeechAvailable
+            ? "自然语音生成失败，已切换系统语音"
+            : "自然语音生成失败，请检查网络后重试",
+          "warning",
+        );
+        if (!systemSpeechAvailable) {
+          stopPlayback();
+          return;
+        }
         renderPlayer();
       }
     }
@@ -2559,9 +2577,16 @@
     speakSystemSegment(segment, token);
   }
 
+  function hasSystemSpeech() {
+    return (
+      typeof window.speechSynthesis?.getVoices === "function" &&
+      typeof window.SpeechSynthesisUtterance === "function"
+    );
+  }
+
   function speakSystemSegment(segment, token) {
-    if (!("speechSynthesis" in window)) {
-      toast("当前浏览器不支持网页朗读", "error");
+    if (!hasSystemSpeech()) {
+      toast("当前浏览器不支持系统朗读，且自然语音尚未就绪", "warning");
       stopPlayback();
       return;
     }
@@ -2589,8 +2614,8 @@
     window.speechSynthesis.speak(utterance);
   }
 
-  async function speakNeuralSegment(segment, token) {
-    const voiceKey = getNeuralVoiceKey(project.settings.voiceURI);
+  async function speakNeuralSegment(segment, token, voiceKeyOverride = "") {
+    const voiceKey = voiceKeyOverride || getNeuralVoiceKey(project.settings.voiceURI);
     if (!voiceKey) {
       throw new Error("Natural voice is not selected");
     }
@@ -2698,10 +2723,10 @@
   }
 
   function preloadNaturalVoice() {
-    if (!isNeuralVoiceValue(project.settings.voiceURI)) {
+    if (!isNeuralVoiceValue(project.settings.voiceURI) && hasSystemSpeech()) {
       return;
     }
-    const voiceKey = getNeuralVoiceKey(project.settings.voiceURI);
+    const voiceKey = getNeuralVoiceKey(project.settings.voiceURI) || "female";
     if (!voiceKey) {
       return;
     }
@@ -2737,10 +2762,10 @@
   }
 
   function warmUpNaturalVoice() {
-    if (!isNeuralVoiceValue(project.settings.voiceURI)) {
+    if (!isNeuralVoiceValue(project.settings.voiceURI) && hasSystemSpeech()) {
       return Promise.resolve();
     }
-    const voiceKey = getNeuralVoiceKey(project.settings.voiceURI);
+    const voiceKey = getNeuralVoiceKey(project.settings.voiceURI) || "female";
     if (!voiceKey) {
       return Promise.resolve();
     }
@@ -2837,7 +2862,7 @@
       renderPlayer();
     } else if (
       runtime.player.state === "playing" &&
-      "speechSynthesis" in window &&
+      hasSystemSpeech() &&
       window.speechSynthesis.speaking
     ) {
       window.speechSynthesis.pause();
@@ -2861,7 +2886,7 @@
   }
 
   function stopActiveSpeech() {
-    if ("speechSynthesis" in window) {
+    if (hasSystemSpeech()) {
       window.speechSynthesis.cancel();
     }
     runtime.neural.generating = false;
@@ -2897,7 +2922,7 @@
   }
 
   function resolveVoice(text) {
-    if (!runtime.voices.length && "speechSynthesis" in window) {
+    if (!runtime.voices.length && hasSystemSpeech()) {
       runtime.voices = window.speechSynthesis.getVoices() || [];
     }
 
