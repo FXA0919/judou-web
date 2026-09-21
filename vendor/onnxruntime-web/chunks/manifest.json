@@ -1,0 +1,24 @@
+{
+  "rawBytes": 13022405,
+  "gzipBytes": 3348495,
+  "chunkCount": 3,
+  "chunkSize": 1116165,
+  "sha256": "92452754caa2ae873bf835fd5fd1d057740f1d74bd0e50d0a5785860e59ab367",
+  "parts": [
+    {
+      "name": "ort-wasm-simd-threaded.wasm.gz.part0",
+      "bytes": 1116165,
+      "sha256": "f4ae59cf845f8a48cfaac6ee1ad9dc59625839d28851d5a0a87e550d4208dbbb"
+    },
+    {
+      "name": "ort-wasm-simd-threaded.wasm.gz.part1",
+      "bytes": 1116165,
+      "sha256": "c7a618b547bbc8a17484a9425af3f6961fc26cdf46f3f5db24ee2e326487604c"
+    },
+    {
+      "name": "ort-wasm-simd-threaded.wasm.gz.part2",
+      "bytes": 1116165,
+      "sha256": "c28faabb946582a15ba35ae2543b21f546360c28f405ebb4761a110fa4d11abe"
+    }
+  ]
+}

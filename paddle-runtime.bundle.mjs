@@ -9,6 +9,7 @@ var __export = (target, all) => {
   for (var name2 in all)
     __defProp(target, name2, { get: all[name2], enumerable: true });
 };
+import * as __ort_wasm_bundle_exports from "./vendor/onnxruntime-web/dist/ort.wasm.bundle.min.mjs";
 
 // ../../outputs/read-along-web/vendor/onnxruntime-web/dist/ort.all.bundle.min.mjs
 var ort_all_bundle_min_exports = {};
@@ -24807,6 +24808,7 @@ var ImageCache = class {
 };
 var MAX_KEY_SAMPLES = 4096;
 var globalImageCache = new ImageCache();
+ort_all_bundle_min_exports = __ort_wasm_bundle_exports;
 function bypassesCache(options) {
   return Boolean(options?.noCache || options?.dictionary || options?.strategy !== void 0 || options?.minimumConfidence !== void 0 || options?.spaceRecovery !== void 0 || options?.rotateVerticalCrops !== void 0 || options?.recBatchSize !== void 0);
 }

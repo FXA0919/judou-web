@@ -2,11 +2,110 @@ const runtimeBundle = await import("./paddle-runtime.bundle.mjs");
 const { ort, PaddleOcrService } = runtimeBundle;
 
 const appBase = new URL("./", import.meta.url);
+const wasmUrl = new URL(
+  "vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm",
+  appBase,
+).href;
+const wasmChunkVersion =
+  "92452754caa2ae873bf835fd5fd1d057740f1d74bd0e50d0a5785860e59ab367";
+const wasmChunkParts = [
+  { name: "ort-wasm-simd-threaded.wasm.gz.part0", bytes: 1116165 },
+  { name: "ort-wasm-simd-threaded.wasm.gz.part1", bytes: 1116165 },
+  { name: "ort-wasm-simd-threaded.wasm.gz.part2", bytes: 1116165 },
+];
+const resourceHosts = [
+  "https://gcore.jsdelivr.net/gh/FXA0919/judou-web@main/",
+  "https://cdn.jsdelivr.net/gh/FXA0919/judou-web@main/",
+  "https://fastly.jsdelivr.net/gh/FXA0919/judou-web@main/",
+];
+const preferLocalModel = Boolean(
+  globalThis.Capacitor?.isNativePlatform?.() ||
+    globalThis.Capacitor?.getPlatform?.() === "android" ||
+    globalThis.androidBridge ||
+    (typeof location !== "undefined" && location.search.includes("desktop=1")),
+);
+const originalFetch = globalThis.fetch.bind(globalThis);
+let activeStageCallback = () => {};
 
 ort.env.wasm.wasmPaths = new URL("vendor/onnxruntime-web/dist/", appBase).href;
 ort.env.wasm.numThreads = 1;
 ort.env.wasm.proxy = false;
 ort.env.logLevel = "error";
+const wasmBinary = await loadWasmBinary().catch(() => null);
+if (wasmBinary) {
+  ort.env.wasm.wasmBinary = wasmBinary;
+}
+
+async function loadWasmBinary() {
+  if (preferLocalModel || !("DecompressionStream" in globalThis)) {
+    return null;
+  }
+  const cacheName = "judou-paddle-wasm-v1";
+  let cache = null;
+  try {
+    cache = await caches.open(cacheName);
+    const cached = await cache.match(wasmUrl);
+    if (cached) {
+      return cached.arrayBuffer();
+    }
+  } catch {
+    cache = null;
+  }
+
+  const gzipSize = wasmChunkParts.reduce((sum, part) => sum + part.bytes, 0);
+  const parts = await Promise.all(
+    wasmChunkParts.map((part) => fetchWasmChunk(part)),
+  );
+  const merged = new Uint8Array(gzipSize);
+  let offset = 0;
+  parts.forEach((part) => {
+    merged.set(part, offset);
+    offset += part.byteLength;
+  });
+  activeStageCallback("正在解压 OCR 运行时");
+  const decompressed = await new Response(
+    new Blob([merged.buffer])
+      .stream()
+      .pipeThrough(new DecompressionStream("gzip")),
+  ).arrayBuffer();
+  if (decompressed.byteLength < 12000000) {
+    throw new Error("OCR runtime is incomplete");
+  }
+  if (cache) {
+    await cache
+      .put(
+        wasmUrl,
+        new Response(decompressed, {
+          headers: { "Content-Type": "application/wasm" },
+        }),
+      )
+      .catch(() => undefined);
+  }
+  return decompressed;
+}
+
+async function fetchWasmChunk(part) {
+  const relative = `vendor/onnxruntime-web/chunks/${part.name}?v=${wasmChunkVersion}`;
+  const urls = resourceHosts.map((host) => `${host}${relative}`);
+  urls.push(new URL(`vendor/onnxruntime-web/chunks/${part.name}`, appBase).href);
+  let lastError = null;
+  for (const url of urls) {
+    try {
+      const response = await originalFetch(url, { cache: "force-cache" });
+      if (!response.ok) {
+        throw new Error(`OCR runtime chunk request failed: ${response.status}`);
+      }
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength !== part.bytes) {
+        throw new Error(`OCR runtime chunk size mismatch: ${part.name}`);
+      }
+      return new Uint8Array(buffer);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error(`Unable to fetch ${part.name}`);
+}
 
 const modelBase = new URL("vendor/paddle-models/", appBase).href;
 const englishModelBase = new URL("vendor/paddle-models/en/", appBase).href;
@@ -92,6 +191,7 @@ export async function initializePaddleOcr(
   }
 
   initializationError = null;
+  activeStageCallback = typeof onStage === "function" ? onStage : () => {};
   const promise = (async () => {
     onStage(
       profileName === "english"
@@ -161,53 +261,107 @@ async function loadResource(url, size) {
       cache = null;
     }
 
-    const probe = await fetch(url, {
-      headers: { Range: "bytes=0-0" },
-    }).catch(() => null);
-    if (!probe || probe.status !== 206) {
-      await probe?.body?.cancel().catch(() => undefined);
-      return fetch(url).then((response) => response.arrayBuffer());
-    }
-    await probe.body?.cancel().catch(() => undefined);
+    const localSource = { url, mode: "ranges" };
+    const remoteSources = remoteResourceUrls(url).map((remoteUrl) => ({
+      url: remoteUrl,
+      mode: "direct",
+    }));
+    const sources = preferLocalModel
+      ? [localSource, ...remoteSources]
+      : [...remoteSources, localSource];
+    let lastError = null;
 
-    const chunkCount = size > 4_000_000 ? 4 : 2;
-    const chunkSize = Math.ceil(size / chunkCount);
-    const buffers = await Promise.all(
-      Array.from({ length: chunkCount }, (_, index) => {
-        const start = index * chunkSize;
-        const end = Math.min(size - 1, start + chunkSize - 1);
-        return fetch(url, {
-          headers: { Range: `bytes=${start}-${end}` },
-        }).then((response) => {
-          if (response.status !== 206) {
-            throw new Error(`Range request failed: ${response.status}`);
-          }
-          return response.arrayBuffer();
-        });
-      }),
-    );
-    const merged = new Uint8Array(size);
-    let offset = 0;
-    buffers.forEach((buffer) => {
-      merged.set(new Uint8Array(buffer), offset);
-      offset += buffer.byteLength;
-    });
-    const response = new Response(merged, {
-      headers: {
-        "Content-Type": "application/octet-stream",
-        "Content-Length": String(size),
-      },
-    });
-    if (cache) {
-      await cache.put(url, response.clone()).catch(() => undefined);
+    for (const source of sources) {
+      try {
+        activeStageCallback("加载 OCR 模型");
+        const buffer =
+          source.mode === "ranges"
+            ? await fetchResourceWithRanges(source.url, size)
+            : await fetchResourceDirect(source.url, size);
+        if (!buffer || buffer.byteLength < size * 0.98) {
+          throw new Error(`Incomplete OCR resource from ${source.url}`);
+        }
+        if (cache) {
+          await cache
+            .put(
+              url,
+              new Response(buffer, {
+                headers: {
+                  "Content-Type": "application/octet-stream",
+                  "Content-Length": String(buffer.byteLength),
+                },
+              }),
+            )
+            .catch(() => undefined);
+        }
+        return buffer;
+      } catch (error) {
+        lastError = error;
+      }
     }
-    return response.arrayBuffer();
+    throw lastError || new Error(`Unable to load OCR resource: ${url}`);
   })().catch((error) => {
     resourceCache.delete(url);
     throw error;
   });
   resourceCache.set(url, promise);
   return promise;
+}
+
+async function fetchResourceDirect(url, size) {
+  const response = await fetch(url, { cache: "force-cache" });
+  if (!response.ok) {
+    throw new Error(`OCR resource request failed: ${response.status}`);
+  }
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength < size * 0.98) {
+    throw new Error("OCR resource is incomplete");
+  }
+  return buffer;
+}
+
+async function fetchResourceWithRanges(url, size) {
+  const probe = await fetch(url, {
+    headers: { Range: "bytes=0-0" },
+  }).catch(() => null);
+  if (!probe || probe.status !== 206) {
+    await probe?.body?.cancel().catch(() => undefined);
+    return fetchResourceDirect(url, size);
+  }
+  await probe.body?.cancel().catch(() => undefined);
+
+  const chunkCount = size > 4_000_000 ? 4 : 2;
+  const chunkSize = Math.ceil(size / chunkCount);
+  const buffers = await Promise.all(
+    Array.from({ length: chunkCount }, (_, index) => {
+      const start = index * chunkSize;
+      const end = Math.min(size - 1, start + chunkSize - 1);
+      return fetch(url, {
+        headers: { Range: `bytes=${start}-${end}` },
+      }).then((response) => {
+        if (response.status !== 206) {
+          throw new Error(`Range request failed: ${response.status}`);
+        }
+        return response.arrayBuffer();
+      });
+    }),
+  );
+  const merged = new Uint8Array(size);
+  let offset = 0;
+  buffers.forEach((buffer) => {
+    merged.set(new Uint8Array(buffer), offset);
+    offset += buffer.byteLength;
+  });
+  return merged.buffer;
+}
+
+function remoteResourceUrls(localUrl) {
+  const pathname = new URL(localUrl).pathname;
+  const marker = "/judou-web/";
+  const relative = pathname.includes(marker)
+    ? pathname.slice(pathname.indexOf(marker) + marker.length)
+    : pathname.replace(/^\/+/, "");
+  return resourceHosts.map((host) => `${host}${relative}`);
 }
 
 export async function recognizeWithPaddleOcr(
