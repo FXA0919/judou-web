@@ -13,7 +13,7 @@
   "vars": {
     "ALLOWED_ORIGINS": "https://fxa0919.github.io",
     "AZURE_SPEECH_REGION": "southeastasia",
-    "DAILY_CHAR_LIMIT": "100000",
-    "DAILY_IP_CHAR_LIMIT": "10000"
+    "DAILY_CHAR_LIMIT": "10000",
+    "DAILY_IP_CHAR_LIMIT": "2000"
   }
 }

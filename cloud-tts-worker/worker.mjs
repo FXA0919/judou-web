@@ -175,8 +175,8 @@ export default {
       body: JSON.stringify({
         ipHash,
         chars: text.length,
-        totalLimit: dailyLimit(env.DAILY_CHAR_LIMIT, 100000),
-        ipLimit: dailyLimit(env.DAILY_IP_CHAR_LIMIT, 10000),
+        totalLimit: dailyLimit(env.DAILY_CHAR_LIMIT, 10000),
+        ipLimit: dailyLimit(env.DAILY_IP_CHAR_LIMIT, 2000),
       }),
     });
     if (!quota.ok) {
