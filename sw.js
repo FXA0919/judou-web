@@ -1,9 +1,10 @@
-const CACHE_NAME = "judou-shell-v9";
+const CACHE_NAME = "judou-shell-v10";
 const SHELL_FILES = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
+  "./voice-config.js",
   "./text-engine.js",
   "./vendor/lucide/lucide.min.js",
 ];
@@ -43,19 +44,21 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (request.mode === "navigate") {
+  if (request.mode === "navigate" || url.pathname.endsWith("/voice-config.js")) {
     event.respondWith(
-      caches.match("./index.html").then((cached) => {
+      caches.match(request.mode === "navigate" ? "./index.html" : request).then((cached) => {
         const network = fetch(request)
           .then((response) => {
             if (response.ok) {
               const copy = response.clone();
-              void caches.open(CACHE_NAME).then((cache) => cache.put("./index.html", copy));
+              void caches.open(CACHE_NAME).then((cache) => cache.put(
+                request.mode === "navigate" ? "./index.html" : request, copy,
+              ));
             }
             return response;
           })
           .catch(() => cached || Response.error());
-        return cached || network;
+        return network;
       }),
     );
     return;

@@ -23,7 +23,9 @@
 
 部分普通静态托管平台对单个文件大小有限制，而本项目中的 OCR 和语音模型超过 80 MB，部署前需要确认平台限制。
 
-## 必须保留的响应头
+GitHub Pages 可供其他人的手机直接打开使用，当前公开地址为 `https://fxa0919.github.io/judou-web/`。它不能保管付费语音服务的密钥。若要启用在线自然语音，请另行部署 `cloud-tts-worker/`，并在 `voice-config.js` 填写其 `/synthesize` 地址。未配置时网页继续使用设备语音。
+
+## 支持自定义响应头的托管
 
 ```text
 Cross-Origin-Opener-Policy: same-origin
@@ -31,7 +33,7 @@ Cross-Origin-Embedder-Policy: credentialless
 Cross-Origin-Resource-Policy: same-origin
 ```
 
-这些响应头用于启用多线程 WASM，可以显著提高 OCR 和自然语音速度。缺少这些响应头时应用仍可运行，但会降级到单线程。
+这些响应头用于启用多线程 WASM，可提高 OCR 和浏览器内模型的速度。GitHub Pages 无法配置这些响应头，因此公网版本使用单线程 WASM；在线语音由独立服务生成，不受此限制。
 
 ## MIME 类型
 

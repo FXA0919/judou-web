@@ -1,0 +1,19 @@
+{
+  "name": "judou-voice",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-09-25",
+  "durable_objects": {
+    "bindings": [
+      { "name": "VOICE_BUDGET", "class_name": "VoiceBudget" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["VoiceBudget"] }
+  ],
+  "vars": {
+    "ALLOWED_ORIGINS": "https://fxa0919.github.io",
+    "AZURE_SPEECH_REGION": "southeastasia",
+    "DAILY_CHAR_LIMIT": "100000",
+    "DAILY_IP_CHAR_LIMIT": "10000"
+  }
+}

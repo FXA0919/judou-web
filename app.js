@@ -9,6 +9,8 @@
   const LOCAL_TESSDATA_LANGS = new Set(["eng", "chi_sim"]);
   const MAX_IMAGE_EDGE = 2400;
   const PADDLE_MAX_IMAGE_EDGE = 2800;
+  const CLOUD_TTS_ENDPOINT = String(window.JUDOU_CLOUD_TTS_ENDPOINT || "").trim();
+  const CLOUD_VOICE_CACHE = "judou-cloud-voice-v1";
 
   const LANGUAGE_INFO = {
     eng: {
@@ -103,7 +105,7 @@
     repeat: 1,
     gap: 0.4,
     loopAll: false,
-    voiceURI: "system:female",
+    voiceURI: CLOUD_TTS_ENDPOINT ? "cloud:female" : "system:female",
     showTranslations: true,
   };
 
@@ -150,6 +152,10 @@
       prefetchPromise: null,
       prepareToken: 0,
       prefetchToken: 0,
+    },
+    cloud: {
+      loading: false,
+      requests: new Map(),
     },
     player: {
       state: "idle",
@@ -553,9 +559,11 @@
         : [],
     };
     if (!hydrated.settings.voiceURI) {
-      hydrated.settings.voiceURI = "system:female";
+      hydrated.settings.voiceURI = DEFAULT_SETTINGS.voiceURI;
     } else if (isNeuralVoiceValue(hydrated.settings.voiceURI)) {
       hydrated.settings.voiceURI = `system:${getNeuralVoiceKey(hydrated.settings.voiceURI)}`;
+    } else if (isCloudVoiceValue(hydrated.settings.voiceURI) && !CLOUD_TTS_ENDPOINT) {
+      hydrated.settings.voiceURI = `system:${getCloudVoiceKey(hydrated.settings.voiceURI)}`;
     }
     runtime.player.currentIndex = hydrated.segments.length ? 0 : -1;
     return hydrated;
@@ -2389,7 +2397,7 @@
 
     const current = segments[runtime.player.currentIndex];
     dom.playbackCounter.textContent =
-      runtime.neural.generating && runtime.player.state === "playing"
+      (runtime.neural.generating || runtime.cloud.loading) && runtime.player.state === "playing"
         ? "正在生成语音"
         : `${runtime.player.currentIndex + 1} / ${segments.length}`;
     dom.focusSentence.textContent = current.text;
@@ -2448,12 +2456,19 @@
       runtime.voices = window.speechSynthesis.getVoices() || [];
     }
 
-    const current = project.settings.voiceURI || "system:female";
+    const current = project.settings.voiceURI || DEFAULT_SETTINGS.voiceURI;
+    const cloudOptions = CLOUD_TTS_ENDPOINT
+      ? `<optgroup label="高质量在线语音">
+          <option value="cloud:female">自然女声 · 在线</option>
+          <option value="cloud:male">自然男声 · 在线</option>
+          <option value="cloud:girl">清亮女声 · 在线</option>
+        </optgroup>`
+      : "";
     const modeOptions = `
       <optgroup label="系统音色">
-        <option value="system:female">女生 · 系统语音</option>
+        <option value="system:female">女声 · 系统语音</option>
         <option value="system:male">男声 · 系统语音</option>
-        <option value="system:girl">少女 · 系统语音</option>
+        <option value="system:girl">清亮 · 系统语音</option>
       </optgroup>
     `;
     const systemOptions = runtime.voices.length
@@ -2464,12 +2479,12 @@
           )
           .join("")}</optgroup>`
       : "";
-    dom.voiceSelect.innerHTML = `${modeOptions}${systemOptions}`;
-    dom.voiceSelect.value = isSystemVoiceMode(current)
+    dom.voiceSelect.innerHTML = `${cloudOptions}${modeOptions}${systemOptions}`;
+    dom.voiceSelect.value = (CLOUD_TTS_ENDPOINT && isCloudVoiceValue(current)) || isSystemVoiceMode(current)
       ? current
       : runtime.voices.some((voice) => voice.voiceURI === current)
         ? current
-        : "system:female";
+        : DEFAULT_SETTINGS.voiceURI;
     renderVoiceModuleSwitcher();
     updateVoiceStatus();
   }
@@ -2478,42 +2493,50 @@
     if (!dom.voiceStatus) {
       return;
     }
+    if (isCloudVoiceValue(project.settings.voiceURI) && CLOUD_TTS_ENDPOINT) {
+      dom.voiceStatus.textContent = "在线自然语音已选择 · 英文句子会发送至语音服务";
+      dom.voiceStatus.classList.remove("is-warning");
+      return;
+    }
     const englishVoices = runtime.voices.filter((voice) =>
-      String(voice.lang || "").toLowerCase().startsWith("en-"),
+      /^en(?:-|$)/i.test(String(voice.lang || "")),
     );
     if (!englishVoices.length) {
       dom.voiceStatus.textContent = "未检测到英语系统语音，请先安装英语语音包";
       dom.voiceStatus.classList.add("is-warning");
       return;
     }
-    const names = englishVoices
-      .slice(0, 3)
-      .map((voice) => voice.name)
-      .join("、");
-    dom.voiceStatus.textContent = `英语语音已就绪：${names}`;
+    const chosen = resolveVoice("English reading sample.");
+    dom.voiceStatus.textContent = chosen
+      ? `当前设备英语音色：${chosen.name}`
+      : `检测到 ${englishVoices.length} 个英语音色`;
     dom.voiceStatus.classList.remove("is-warning");
   }
 
   function renderVoiceModuleSwitcher() {
     const current = project.settings.voiceURI;
     dom.voiceModuleSwitcher.querySelectorAll("[data-voice-module]").forEach((button) => {
-      const active = button.dataset.voiceModule === current;
+      const active = button.dataset.voiceModule === getVoiceMode(current);
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-pressed", String(active));
     });
   }
 
   function setVoiceModule(value) {
-    if (!isSystemVoiceMode(value)) {
+    if (!["female", "male", "girl"].includes(value)) {
       return;
     }
     stopPlayback();
-    project.settings.voiceURI = value;
-    dom.voiceSelect.value = value;
+    const provider = isCloudVoiceValue(project.settings.voiceURI) && CLOUD_TTS_ENDPOINT
+      ? "cloud"
+      : "system";
+    project.settings.voiceURI = `${provider}:${value}`;
+    dom.voiceSelect.value = project.settings.voiceURI;
     runtime.neural.prefetchIndex = -1;
     runtime.neural.prefetchPromise = null;
     runtime.neural.prefetchToken += 1;
     renderVoiceModuleSwitcher();
+    updateVoiceStatus();
     scheduleSave();
   }
 
@@ -2596,6 +2619,22 @@
       return;
     }
 
+    if (CLOUD_TTS_ENDPOINT && isCloudVoiceValue(project.settings.voiceURI) &&
+        detectSentenceSource(segment.text) === "eng") {
+      try {
+        await speakCloudSegment(segment, token);
+        return;
+      } catch (error) {
+        if (token !== runtime.player.token) {
+          return;
+        }
+        runtime.cloud.loading = false;
+        console.warn("Online speech failed", error);
+        toast("在线语音暂不可用，已尝试设备语音", "warning");
+        renderPlayer();
+      }
+    }
+
     const systemSpeechAvailable = hasSystemSpeech();
     const englishNeuralFallback =
       !systemSpeechAvailable && detectSentenceSource(segment.text) === "eng";
@@ -2647,6 +2686,108 @@
     speakSystemSegment(segment, token);
   }
 
+  async function speakCloudSegment(segment, token) {
+    // Unlock Web Audio while the play button's user gesture is still active.
+    const audioContext = await ensureNeuralAudioContext();
+    runtime.cloud.loading = true;
+    renderPlayer();
+    const blob = await getCloudAudioBlob(segment.text, getCloudVoiceKey(project.settings.voiceURI));
+    if (token !== runtime.player.token || runtime.player.state !== "playing") {
+      return;
+    }
+    const buffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
+    if (token !== runtime.player.token || runtime.player.state !== "playing") {
+      return;
+    }
+    releaseNeuralAudio();
+    const source = audioContext.createBufferSource();
+    const gainNode = audioContext.createGain();
+    source.buffer = buffer;
+    source.playbackRate.value = clamp(Number(project.settings.rate) || 1, 0.6, 1.4);
+    source.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+    source.onended = () => handleSegmentFinished(token);
+    runtime.neural.source = source;
+    runtime.neural.gainNode = gainNode;
+    runtime.cloud.loading = false;
+    renderPlayer();
+    await audioContext.resume();
+    source.start();
+    const next = project.segments[runtime.player.currentIndex + 1];
+    if (next && detectSentenceSource(next.text) === "eng") {
+      void getCloudAudioBlob(next.text, getCloudVoiceKey(project.settings.voiceURI))
+        .catch(() => undefined);
+    }
+  }
+
+  async function getCloudAudioBlob(text, voice) {
+    const normalized = String(text || "").replace(/\s+/g, " ").trim();
+    if (!normalized || normalized.length > 1200) {
+      throw new Error("Sentence length is outside the online voice limit");
+    }
+    const key = `${CLOUD_TTS_ENDPOINT}|${voice}|${normalized}`;
+    const existing = runtime.cloud.requests.get(key);
+    if (existing) {
+      return existing;
+    }
+    const promise = (async () => {
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+      const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+      const cacheUrl = new URL(`./__voice_cache__/${hash}`, window.location.href).href;
+      let cache = null;
+      try {
+        cache = await window.caches?.open(CLOUD_VOICE_CACHE);
+        const cached = await cache?.match(cacheUrl);
+        if (cached) {
+          return cached.blob();
+        }
+      } catch {
+        // Private browsing and storage quotas can disable Cache Storage.
+      }
+
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 20000);
+      let response;
+      try {
+        response = await fetch(CLOUD_TTS_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: normalized, voice }),
+          signal: controller.signal,
+        });
+      } finally {
+        window.clearTimeout(timeout);
+      }
+      if (!response.ok) {
+        throw new Error(`Online voice returned ${response.status}`);
+      }
+      const blob = await response.blob();
+      if (!blob.size || !String(response.headers.get("Content-Type") || "").includes("audio/")) {
+        throw new Error("Online voice returned invalid audio");
+      }
+      if (cache) {
+        try {
+          await cache.put(cacheUrl, new Response(blob, {
+            headers: { "Content-Type": "audio/mpeg" },
+          }));
+          const keys = await cache.keys();
+          if (keys.length > 60) {
+            await Promise.all(keys.slice(0, keys.length - 60).map((request) => cache.delete(request)));
+          }
+        } catch {
+          // Playback remains available when persistent caching fails.
+        }
+      }
+      return blob;
+    })();
+    runtime.cloud.requests.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      runtime.cloud.requests.delete(key);
+    }
+  }
+
   function hasSystemSpeech() {
     return (
       typeof window.speechSynthesis?.getVoices === "function" &&
@@ -2661,7 +2802,9 @@
       return;
     }
 
-    const clauses = splitSpeechClauses(segment.text);
+    const text = String(segment.text || "").replace(/\s+/g, " ").trim();
+    // Let the speech engine handle punctuation and intonation for normal sentences.
+    const clauses = text.length > 220 ? splitLongSpeechClause(text) : [text];
     speakSystemClause(segment, token, clauses, 0);
   }
 
@@ -2671,7 +2814,8 @@
     }
 
     const clause = clauses[index];
-    const mode = getSystemVoiceMode(project.settings.voiceURI);
+    const mode = getSystemVoiceMode(project.settings.voiceURI) ||
+      (isCloudVoiceValue(project.settings.voiceURI) ? getCloudVoiceKey(project.settings.voiceURI) : "");
     const utterance = new SpeechSynthesisUtterance(clause);
     const voice = resolveVoice(segment.text, mode);
     const locale = speechLocaleForSegment(segment.text).toLowerCase();
@@ -2683,8 +2827,8 @@
     utterance.voice = voice || null;
     utterance.lang = voice?.lang || speechLocaleForSegment(segment.text);
     const baseRate = clamp(Number(project.settings.rate) || 1, 0.5, 2);
-    utterance.rate = clamp(baseRate + ((index % 3) - 1) * 0.025, 0.5, 2);
-    utterance.pitch = clamp(getSystemPitch(mode) + (index % 2 ? 0.015 : -0.01), 0.5, 2);
+    utterance.rate = baseRate;
+    utterance.pitch = 1;
     utterance.volume = 1;
 
     utterance.onend = () => {
@@ -2694,7 +2838,7 @@
       if (index + 1 < clauses.length) {
         runtime.player.timer = window.setTimeout(
           () => speakSystemClause(segment, token, clauses, index + 1),
-          pauseAfterSpeech(clause),
+          40,
         );
       } else {
         handleSegmentFinished(token);
@@ -2713,27 +2857,13 @@
     window.speechSynthesis.speak(utterance);
   }
 
-  function splitSpeechClauses(text) {
-    const normalized = String(text || "").replace(/\s+/g, " ").trim();
-    if (!normalized) {
-      return [""];
-    }
-
-    const pieces =
-      normalized.match(/[^.!?;:，,；：]+[.!?;:，,；：]?/g)?.map((piece) => piece.trim()) || [];
-    if (pieces.length <= 1) {
-      return splitLongSpeechClause(normalized);
-    }
-    return pieces.flatMap((piece) => splitLongSpeechClause(piece));
-  }
-
   function splitLongSpeechClause(text) {
     const output = [];
     let remaining = text.trim();
-    while (remaining.length > 165) {
-      let splitAt = remaining.lastIndexOf(" ", 150);
-      if (splitAt < 70) {
-        splitAt = 150;
+    while (remaining.length > 220) {
+      let splitAt = remaining.lastIndexOf(" ", 205);
+      if (splitAt < 100) {
+        splitAt = 205;
       }
       output.push(remaining.slice(0, splitAt).trim());
       remaining = remaining.slice(splitAt).trim();
@@ -2742,29 +2872,6 @@
       output.push(remaining);
     }
     return output;
-  }
-
-  function pauseAfterSpeech(clause) {
-    if (/[.!?。？！]$/.test(clause)) {
-      return 180;
-    }
-    if (/[;:；：]$/.test(clause)) {
-      return 125;
-    }
-    if (/[,，、]$/.test(clause)) {
-      return 70;
-    }
-    return 45;
-  }
-
-  function getSystemPitch(mode) {
-    if (mode === "male") {
-      return 0.9;
-    }
-    if (mode === "girl") {
-      return 1.16;
-    }
-    return 1.02;
   }
 
   async function speakNeuralSegment(segment, token, voiceKeyOverride = "") {
@@ -2999,7 +3106,7 @@
       return;
     }
 
-    if (runtime.player.state === "playing" && runtime.neural.generating) {
+    if (runtime.player.state === "playing" && (runtime.neural.generating || runtime.cloud.loading)) {
       stopPlayback();
       toast("已取消语音生成", "warning");
       return;
@@ -3043,6 +3150,7 @@
       window.speechSynthesis.cancel();
     }
     runtime.neural.generating = false;
+    runtime.cloud.loading = false;
     runtime.neural.prefetchIndex = -1;
     runtime.neural.prefetchPromise = null;
     releaseNeuralAudio();
@@ -3088,7 +3196,7 @@
     if (
       selected &&
       (!locale.startsWith("en-") ||
-        String(selected.lang || "").toLowerCase().startsWith("en-"))
+        /^en(?:-|$)/i.test(String(selected.lang || "")))
     ) {
       return selected;
     }
@@ -3111,15 +3219,16 @@
           score += 16;
         }
         if (mode === "male") {
-          score += gender === "male" ? 24 : gender === "female" ? -8 : 0;
-        } else if (mode === "female") {
-          score += gender === "female" ? 18 : gender === "male" ? -8 : 0;
-        } else if (mode === "girl") {
-          score += gender === "female" ? 22 : gender === "male" ? -10 : 0;
+          score += gender === "male" ? 45 : gender === "female" ? -30 : 0;
+        } else if (mode === "female" || mode === "girl") {
+          score += gender === "female" ? 40 : gender === "male" ? -30 : 0;
         }
-        if (voice.localService) {
-          score += 1;
-        }
+        const name = `${voice.name || ""} ${voice.voiceURI || ""}`.toLowerCase();
+        if (/neural|natural|enhanced|premium/.test(name)) score += 25;
+        if (/google|microsoft/.test(name)) score += 8;
+        if (/espeak|pico|compact/.test(name)) score -= 25;
+        if (mode === "girl" && /jenny|ava|samantha|victoria/.test(name)) score += 12;
+        if (voice.default) score += 2;
         return { voice, score };
       })
       .sort((left, right) => right.score - left.score)[0].voice;
@@ -3259,6 +3368,19 @@
 
   function isSystemVoiceMode(value) {
     return /^system:(female|male|girl)$/.test(String(value || ""));
+  }
+
+  function isCloudVoiceValue(value) {
+    return /^cloud:(female|male|girl)$/.test(String(value || ""));
+  }
+
+  function getCloudVoiceKey(value) {
+    const match = /^cloud:(female|male|girl)$/.exec(String(value || ""));
+    return match ? match[1] : "female";
+  }
+
+  function getVoiceMode(value) {
+    return /^(?:cloud|system):(female|male|girl)$/.exec(String(value || ""))?.[1] || "";
   }
 
   function getSystemVoiceMode(value) {
