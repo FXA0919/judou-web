@@ -1,8 +1,9 @@
 const VOICES = Object.freeze({
-  female: "en-US-AvaNeural",
-  male: "en-US-AndrewNeural",
-  girl: "en-US-JennyNeural",
+  female: "cora",
+  male: "arcas",
+  girl: "iris",
 });
+const MODEL = "@cf/deepgram/aura-2-en";
 const MAX_TEXT_LENGTH = 1200;
 const CACHE_SECONDS = 7 * 24 * 60 * 60;
 
@@ -33,12 +34,6 @@ function jsonError(message, status, origin = "") {
       ...(origin ? corsHeaders(origin) : {}),
     },
   });
-}
-
-function escapeXml(value) {
-  return value.replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;",
-  })[character]);
 }
 
 async function sha256(value) {
@@ -118,7 +113,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/health" && request.method === "GET") {
-      return new Response(JSON.stringify({ ready: Boolean(env.AZURE_SPEECH_KEY && env.AZURE_SPEECH_REGION) }), {
+      return new Response(JSON.stringify({ ready: Boolean(env.AI && env.VOICE_BUDGET) }), {
         headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
       });
     }
@@ -155,12 +150,11 @@ export default {
     if (!text || text.length > MAX_TEXT_LENGTH || !Object.hasOwn(VOICES, voice)) {
       return jsonError("Invalid text or voice", 400, origin);
     }
-    const region = String(env.AZURE_SPEECH_REGION || "").trim().toLowerCase();
-    if (!env.AZURE_SPEECH_KEY || !/^[a-z0-9]+$/.test(region) || !env.VOICE_BUDGET) {
+    if (!env.AI || !env.VOICE_BUDGET) {
       return jsonError("Voice service is not configured", 503, origin);
     }
 
-    const cacheKey = new Request(new URL(`/__audio_cache__/${await sha256(`v1|${voice}|${text}`)}`, url.origin));
+    const cacheKey = new Request(new URL(`/__audio_cache__/${await sha256(`v2|${voice}|${text}`)}`, url.origin));
     const cache = caches.default;
     const cached = await cache.match(cacheKey);
     if (cached) {
@@ -175,39 +169,28 @@ export default {
       body: JSON.stringify({
         ipHash,
         chars: text.length,
-        totalLimit: dailyLimit(env.DAILY_CHAR_LIMIT, 10000),
-        ipLimit: dailyLimit(env.DAILY_IP_CHAR_LIMIT, 2000),
+        totalLimit: dailyLimit(env.DAILY_CHAR_LIMIT, 3000),
+        ipLimit: dailyLimit(env.DAILY_IP_CHAR_LIMIT, 1000),
       }),
     });
     if (!quota.ok) {
       return jsonError("Daily voice limit reached", 429, origin);
     }
 
-    const ssml = `<speak version="1.0" xml:lang="en-US"><voice name="${VOICES[voice]}">${escapeXml(text)}</voice></speak>`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    let azure;
+    let synthesized;
     try {
-      azure = await fetch(`https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`, {
-        method: "POST",
-        headers: {
-          "Ocp-Apim-Subscription-Key": env.AZURE_SPEECH_KEY,
-          "Content-Type": "application/ssml+xml",
-          "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
-          "User-Agent": "JudouWeb",
-        },
-        body: ssml,
-        signal: controller.signal,
-      });
+      synthesized = await env.AI.run(MODEL, {
+        text,
+        speaker: VOICES[voice],
+        encoding: "mp3",
+      }, { returnRawResponse: true });
     } catch {
       return jsonError("Voice provider unavailable", 502, origin);
-    } finally {
-      clearTimeout(timer);
     }
-    if (!azure.ok) {
+    if (!synthesized.ok) {
       return jsonError("Voice provider rejected the request", 502, origin);
     }
-    const audio = await azure.arrayBuffer();
+    const audio = await synthesized.arrayBuffer();
     if (!audio.byteLength || audio.byteLength > 8_000_000) {
       return jsonError("Invalid voice audio", 502, origin);
     }
