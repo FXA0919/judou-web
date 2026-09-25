@@ -1252,6 +1252,17 @@ textarea:hover,
   box-shadow: var(--shadow-sm);
 }
 
+.voice-status {
+  margin: 8px 0 -8px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.voice-status.is-warning {
+  color: #9a6420;
+}
+
 .playback-controls {
   display: flex;
   align-items: center;

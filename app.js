@@ -246,6 +246,7 @@
       "showTranslations",
       "listenList",
       "voiceModuleSwitcher",
+      "voiceStatus",
       "voiceSelect",
       "rateControl",
       "rateValue",
@@ -456,6 +457,7 @@
       runtime.neural.prefetchPromise = null;
       runtime.neural.prefetchToken += 1;
       renderVoiceModuleSwitcher();
+      updateVoiceStatus();
       scheduleSave();
     });
     dom.translationProvider.addEventListener("change", () => {
@@ -2469,6 +2471,27 @@
         ? current
         : "system:female";
     renderVoiceModuleSwitcher();
+    updateVoiceStatus();
+  }
+
+  function updateVoiceStatus() {
+    if (!dom.voiceStatus) {
+      return;
+    }
+    const englishVoices = runtime.voices.filter((voice) =>
+      String(voice.lang || "").toLowerCase().startsWith("en-"),
+    );
+    if (!englishVoices.length) {
+      dom.voiceStatus.textContent = "未检测到英语系统语音，请先安装英语语音包";
+      dom.voiceStatus.classList.add("is-warning");
+      return;
+    }
+    const names = englishVoices
+      .slice(0, 3)
+      .map((voice) => voice.name)
+      .join("、");
+    dom.voiceStatus.textContent = `英语语音已就绪：${names}`;
+    dom.voiceStatus.classList.remove("is-warning");
   }
 
   function renderVoiceModuleSwitcher() {
@@ -2651,6 +2674,12 @@
     const mode = getSystemVoiceMode(project.settings.voiceURI);
     const utterance = new SpeechSynthesisUtterance(clause);
     const voice = resolveVoice(segment.text, mode);
+    const locale = speechLocaleForSegment(segment.text).toLowerCase();
+    if (locale.startsWith("en-") && !voice) {
+      toast("未检测到英语系统语音，请先安装英语语音包", "warning");
+      stopPlayback();
+      return;
+    }
     utterance.voice = voice || null;
     utterance.lang = voice?.lang || speechLocaleForSegment(segment.text);
     const baseRate = clamp(Number(project.settings.rate) || 1, 0.5, 2);
@@ -3050,16 +3079,19 @@
       runtime.voices = window.speechSynthesis.getVoices() || [];
     }
 
-    const selected = runtime.voices.find(
-      (voice) => voice.voiceURI === project.settings.voiceURI,
-    );
-    if (selected) {
-      return selected;
-    }
-
     const locale = speechLocaleForSegment(text).toLowerCase();
     const base = locale.split("-")[0];
     const mode = modeOverride || getSystemVoiceMode(project.settings.voiceURI);
+    const selected = runtime.voices.find(
+      (voice) => voice.voiceURI === project.settings.voiceURI,
+    );
+    if (
+      selected &&
+      (!locale.startsWith("en-") ||
+        String(selected.lang || "").toLowerCase().startsWith("en-"))
+    ) {
+      return selected;
+    }
     const candidates = runtime.voices.filter((voice) => {
       const voiceLang = voice.lang.toLowerCase();
       return voiceLang === locale || voiceLang.startsWith(`${base}-`) || voiceLang === base;
