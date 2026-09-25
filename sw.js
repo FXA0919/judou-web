@@ -1,4 +1,4 @@
-const CACHE_NAME = "judou-shell-v10";
+const CACHE_NAME = "judou-shell-v11";
 const SHELL_FILES = [
   "./",
   "./index.html",
