@@ -985,6 +985,7 @@
     dom.processBtn.disabled = true;
     dom.processBtn.querySelector("span").textContent = "正在识别";
     setOCRProgress(0, "准备识别");
+    let postOcrTask = null;
 
     try {
       let engine = "tesseract";
@@ -1046,20 +1047,15 @@
       const engineLabel = engine === "paddle" ? "PaddleOCR" : "Tesseract";
       toast(`${engineLabel} 识别完成，共 ${project.segments.length} 句`, "success");
 
-      if (project.settings.grammarCheck) {
-        void correctSegmentGrammar({
-          force: true,
-          silent: true,
-          translateAfter: true,
-        }).finally(() => warmUpNaturalVoice());
-      } else if (
-        project.settings.autoTranslate &&
-        !isChineseSource(project.settings.ocrLanguage)
-      ) {
-        translateMissingSegments().finally(() => warmUpNaturalVoice());
-      } else {
-        warmUpNaturalVoice();
-      }
+      postOcrTask = () => {
+        if (project.settings.grammarCheck) {
+          return correctSegmentGrammar({ force: true, silent: true, translateAfter: true });
+        }
+        if (project.settings.autoTranslate && !isChineseSource(project.settings.ocrLanguage)) {
+          return translateMissingSegments();
+        }
+        return Promise.resolve();
+      };
     } catch (error) {
       console.error("OCR initialization failed", error);
       toast(friendlyOcrError(error), "error");
@@ -1072,6 +1068,18 @@
       }, 900);
       renderPages();
       scheduleSave();
+      if (postOcrTask) {
+        window.setTimeout(() => {
+          void postOcrTask()
+            .catch((error) => {
+              console.error("Post-OCR processing failed", error);
+              toast("校对或翻译未完成，原文已经保留", "warning");
+            })
+            .finally(() => warmUpNaturalVoice());
+        }, MOBILE_OCR ? 350 : 0);
+      } else {
+        void warmUpNaturalVoice();
+      }
     }
   }
 
@@ -1712,6 +1720,8 @@
         !isChineseSource(project.settings.ocrLanguage)
       ) {
         translationStarted = true;
+        // Give mobile browsers a paint/GC opportunity after releasing the grammar model.
+        await sleep(MOBILE_OCR ? 350 : 0);
         await translateMissingSegments();
       }
     } catch (error) {
@@ -1733,6 +1743,7 @@
       if (translateAfter && !translationStarted &&
         project.settings.autoTranslate &&
         !isChineseSource(project.settings.ocrLanguage)) {
+        await sleep(MOBILE_OCR ? 350 : 0);
         await translateMissingSegments();
       }
     }
@@ -2081,8 +2092,8 @@
   }
 
   function segmentText(text, languageCode) {
-    return window.TextPipeline.segment(text, languageCode).map((segment) => ({
-      id: createId(),
+    return window.TextPipeline.segment(text, languageCode).map((segment, index) => ({
+      id: stableSegmentId(segment.text, segment.paragraph, index),
       text: segment.text,
       translation: "",
       paragraph: segment.paragraph,
@@ -3748,6 +3759,16 @@
       return window.crypto.randomUUID();
     }
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  function stableSegmentId(text, paragraph, index) {
+    const source = `${Number(paragraph) || 0}:${index}:${normalizeComparableText(text)}`;
+    let hash = 2166136261;
+    for (let offset = 0; offset < source.length; offset += 1) {
+      hash ^= source.charCodeAt(offset);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `segment-${(hash >>> 0).toString(16).padStart(8, "0")}`;
   }
 
   function clamp(value, min, max) {
