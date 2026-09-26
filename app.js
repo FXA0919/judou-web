@@ -1025,7 +1025,10 @@
       }
 
       const reconstructedDocument = window.TextPipeline.fromDocumentPages(project.pages);
-      const fullText = normalizeDocumentText(reconstructedDocument.text);
+      const recognizedText = normalizeDocumentText(reconstructedDocument.text);
+      const fullText = project.settings.ocrLanguage.split("+").includes("eng")
+        ? window.TextPipeline.repairEnglishPronounOcr(recognizedText)
+        : recognizedText;
       if (!fullText) {
         throw new Error("No usable text was recognized");
       }

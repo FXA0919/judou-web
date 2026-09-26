@@ -68,4 +68,17 @@ const tesseract = pipeline.fromTesseract({ blocks: [{ paragraphs: [{ lines: [{
 assert.equal(tesseract.lines.length, 2);
 assert.equal(tesseract.lines[0].text, "Left");
 assert.equal(tesseract.lines[1].text, "Right");
+
+assert.equal(
+  pipeline.repairEnglishPronounOcr(
+    "1 am ready. | have a book. l think it helps. 1've learned. And 1 went home. 1 don't know. 1 study daily.",
+  ),
+  "I am ready. I have a book. I think it helps. I've learned. And I went home. I don't know. I study daily.",
+);
+assert.equal(
+  pipeline.repairEnglishPronounOcr(
+    "Chapter 1 will begin. Page 1 has a picture. I have 1 book and 1 can of beans. At 1 am I left.",
+  ),
+  "Chapter 1 will begin. Page 1 has a picture. I have 1 book and 1 can of beans. At 1 am I left.",
+);
 console.log("text layout and figure-label tests passed");

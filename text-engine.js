@@ -78,6 +78,32 @@
 
   const BULLET_RE = /^\s*(?:[-*•·▪◦‣–—]|(?:\d{1,3}|[a-zA-Z])[.)])\s+/;
   const TERMINAL_RE = /[.!?。！？]["'”’»)\]]*$/;
+  const FIRST_PERSON_VERBS = new Set([
+    "am", "was", "were", "have", "had", "will", "would", "shall", "should",
+    "can", "cannot", "could", "may", "might", "must", "do", "did", "don't", "didn't",
+    "want", "wanted", "need", "needed", "know", "knew", "think", "thought",
+    "believe", "believed", "feel", "felt", "see", "saw", "hear", "heard",
+    "read", "write", "wrote", "say", "said", "ask", "asked", "get", "got",
+    "go", "went", "come", "came", "learn", "learned", "work", "worked",
+    "try", "tried", "find", "found", "remember", "hope", "hoped", "like",
+    "liked", "love", "loved", "prefer", "preferred", "start", "started",
+    "use", "used", "understand", "understood",
+    "enjoy", "enjoyed", "study", "studied", "play", "played", "eat", "ate",
+    "make", "made", "take", "took", "give", "gave", "speak", "spoke",
+    "tell", "told", "look", "looked", "live", "lived", "help", "helped",
+    "buy", "bought", "keep", "kept", "leave", "left", "grow", "grew",
+    "sleep", "slept", "walk", "walked", "run", "ran", "sit", "sat",
+    "stand", "stood", "spend", "spent", "visit", "visited", "watch", "watched",
+    "listen", "listened", "choose", "chose", "become", "became", "bring",
+    "brought", "open", "opened", "close", "closed", "wait", "waited",
+    "call", "called", "meet", "met", "show", "showed", "plan", "planned",
+    "decide", "decided",
+  ]);
+  const NUMBER_LABELS = new Set([
+    "chapter", "lesson", "unit", "page", "figure", "table", "number", "no",
+    "step", "item", "option", "example", "section", "verse", "question",
+    "point", "line", "row", "column", "part", "value", "score", "answer",
+  ]);
 
   function fromPaddle(result) {
     const groups = Array.isArray(result?.lines) ? result.lines : [];
@@ -961,6 +987,30 @@
       .trim();
   }
 
+  function repairEnglishPronounOcr(text) {
+    return String(text || "").replace(
+      /(^|[^\p{L}\p{N}])([1l|¦｜])(?=(?:['’](?:m|ve|ll|d)\b)|(?:\s+([A-Za-z]+(?:['’][A-Za-z]+)?)))/gu,
+      (match, boundary, glyph, nextWord, offset, source) => {
+        const before = source.slice(0, offset + boundary.length);
+        const previousWord = before.match(/([A-Za-z]+)\W*$/)?.[1]?.toLowerCase();
+        if (NUMBER_LABELS.has(previousWord)) {
+          return match;
+        }
+        const after = source.slice(offset + match.length);
+        if (/^['’](?:m|ve|ll|d)\b/i.test(after)) {
+          return `${boundary}I`;
+        }
+        const follower = nextWord?.toLowerCase();
+        if (!FIRST_PERSON_VERBS.has(follower) ||
+          (follower === "can" && /^\s+can\s+of\b/i.test(after)) ||
+          (follower === "am" && /\b(?:at|around|about|from|until)\W*$/i.test(before))) {
+          return match;
+        }
+        return `${boundary}I`;
+      },
+    );
+  }
+
   function joinRecognizedItems(items) {
     let output = "";
     items.forEach((item) => {
@@ -1110,6 +1160,7 @@
     fromDocumentPages,
     normalizePageText,
     normalizeDocumentText,
+    repairEnglishPronounOcr,
     segment,
   };
 })();
