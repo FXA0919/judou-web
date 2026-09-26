@@ -7,8 +7,11 @@
   const META_STORE = "meta";
   const REMOTE_TESSDATA = "https://tessdata.projectnaptha.com/4.0.0";
   const LOCAL_TESSDATA_LANGS = new Set(["eng", "chi_sim"]);
-  const MAX_IMAGE_EDGE = 2400;
-  const PADDLE_MAX_IMAGE_EDGE = 2800;
+  const MOBILE_OCR =
+    navigator.userAgentData?.mobile === true ||
+    /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  const MAX_IMAGE_EDGE = MOBILE_OCR ? 1800 : 2400;
+  const PADDLE_MAX_IMAGE_EDGE = MOBILE_OCR ? 1800 : 2800;
   const CLOUD_TTS_ENDPOINT = String(window.JUDOU_CLOUD_TTS_ENDPOINT || "").trim();
   const CLOUD_VOICE_CACHE = "judou-cloud-voice-v1";
 
@@ -972,9 +975,6 @@
     runtime.ocr.active = true;
     runtime.ocr.pageCount = project.pages.length;
     runtime.ocr.localProgress = 0;
-    if (project.settings.grammarCheck) {
-      void preloadGrammarModel();
-    }
     dom.processBtn.disabled = true;
     dom.processBtn.querySelector("span").textContent = "正在识别";
     setOCRProgress(0, "准备识别");
@@ -1001,7 +1001,14 @@
 
       runtime.ocr.engineUsed = engine;
       if (engine === "paddle") {
-        await runPaddleOcrPipeline();
+        try {
+          await runPaddleOcrPipeline();
+        } finally {
+          if (MOBILE_OCR) {
+            const paddle = await loadPaddleOcrModule();
+            await paddle.releasePaddleOcr(getPaddleProfile());
+          }
+        }
       } else {
         await runTesseractOcrPipeline();
       }
@@ -1049,7 +1056,7 @@
 
   function loadPaddleOcrModule() {
     if (!runtime.ocr.paddleModulePromise) {
-      runtime.ocr.paddleModulePromise = import("./paddle-ocr.mjs").catch((error) => {
+      runtime.ocr.paddleModulePromise = import("./paddle-ocr.mjs?v=mobile-ocr-v1").catch((error) => {
         runtime.ocr.paddleModulePromise = null;
         throw error;
       });
@@ -1134,8 +1141,9 @@
       page.error = "";
       renderPages();
 
+      let prepared;
       try {
-        const prepared = await prepareImageForPaddle(file);
+        prepared = await prepareImageForPaddle(file);
         setOCRProgress(index / project.pages.length, `PaddleOCR · 第 ${index + 1} / ${project.pages.length} 张`);
         const result = await paddle.recognizeWithPaddleOcr(
           prepared,
@@ -1153,6 +1161,11 @@
         page.status = "error";
         page.error = friendlyOcrError(error);
         toast(`${page.name}：${page.error}`, "error");
+      } finally {
+        if (prepared) {
+          prepared.width = 0;
+          prepared.height = 0;
+        }
       }
 
       setOCRProgress((index + 1) / project.pages.length, `已完成第 ${index + 1} / ${project.pages.length} 张`);
@@ -1938,7 +1951,12 @@
     context.fillRect(0, 0, width, height);
     context.drawImage(source, 0, 0, width, height);
     bitmap.close?.();
-    return canvasToDataUrl(canvas, "image/jpeg", 0.8);
+    try {
+      return canvasToDataUrl(canvas, "image/jpeg", 0.8);
+    } finally {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
   }
 
   async function prepareImageForOcr(file) {
@@ -1963,6 +1981,8 @@
     }
 
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+    canvas.width = 0;
+    canvas.height = 0;
     if (!blob) {
       throw new Error("Image processing failed");
     }
@@ -1975,7 +1995,7 @@
     const scale =
       longestEdge > PADDLE_MAX_IMAGE_EDGE
         ? PADDLE_MAX_IMAGE_EDGE / longestEdge
-        : longestEdge < 1600
+        : !MOBILE_OCR && longestEdge < 1600
           ? Math.min(2, 1600 / longestEdge)
           : 1;
     const width = Math.max(1, Math.round(bitmap.width * scale));
@@ -1997,36 +2017,49 @@
   }
 
   function enhanceCanvas(context, width, height) {
-    const imageData = context.getImageData(0, 0, width, height);
-    const data = imageData.data;
+    const sampleCanvas = document.createElement("canvas");
+    const sampleScale = Math.min(1, 128 / Math.max(width, height));
+    sampleCanvas.width = Math.max(1, Math.round(width * sampleScale));
+    sampleCanvas.height = Math.max(1, Math.round(height * sampleScale));
+    const sampleContext = sampleCanvas.getContext("2d", { willReadFrequently: true });
+    sampleContext.drawImage(context.canvas, 0, 0, sampleCanvas.width, sampleCanvas.height);
+    const sampleData = sampleContext.getImageData(
+      0, 0, sampleCanvas.width, sampleCanvas.height,
+    ).data;
     let sampleTotal = 0;
     let sampleCount = 0;
-    const sampleStep = Math.max(4, Math.floor(data.length / 16000 / 4) * 4);
-
-    for (let index = 0; index < data.length; index += sampleStep) {
-      sampleTotal += data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+    for (let index = 0; index < sampleData.length; index += 4) {
+      sampleTotal += sampleData[index] * 0.299 +
+        sampleData[index + 1] * 0.587 + sampleData[index + 2] * 0.114;
       sampleCount += 1;
     }
+    sampleCanvas.width = 0;
+    sampleCanvas.height = 0;
 
     const average = sampleCount ? sampleTotal / sampleCount : 180;
     const contrast = average < 135 ? 1.34 : 1.2;
     const brightness = average < 120 ? 7 : 2;
 
-    for (let index = 0; index < data.length; index += 4) {
-      data[index] = clamp((data[index] - 128) * contrast + 128 + brightness, 0, 255);
-      data[index + 1] = clamp(
-        (data[index + 1] - 128) * contrast + 128 + brightness,
-        0,
-        255,
-      );
-      data[index + 2] = clamp(
-        (data[index + 2] - 128) * contrast + 128 + brightness,
-        0,
-        255,
-      );
+    const stripHeight = Math.max(1, Math.floor(1_048_576 / width));
+    for (let top = 0; top < height; top += stripHeight) {
+      const rows = Math.min(stripHeight, height - top);
+      const imageData = context.getImageData(0, top, width, rows);
+      const data = imageData.data;
+      for (let index = 0; index < data.length; index += 4) {
+        data[index] = clamp((data[index] - 128) * contrast + 128 + brightness, 0, 255);
+        data[index + 1] = clamp(
+          (data[index + 1] - 128) * contrast + 128 + brightness,
+          0,
+          255,
+        );
+        data[index + 2] = clamp(
+          (data[index + 2] - 128) * contrast + 128 + brightness,
+          0,
+          255,
+        );
+      }
+      context.putImageData(imageData, 0, top);
     }
-
-    context.putImageData(imageData, 0, 0);
   }
 
   async function loadBitmap(file) {

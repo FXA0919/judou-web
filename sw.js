@@ -1,4 +1,4 @@
-const CACHE_NAME = "judou-shell-v11";
+const CACHE_NAME = "judou-shell-v12";
 const SHELL_FILES = [
   "./",
   "./index.html",
@@ -66,16 +66,19 @@ self.addEventListener("fetch", (event) => {
 
   event.respondWith(
     caches.match(request).then((cached) => {
-      const network = fetch(request)
+      if (cached) {
+        return cached;
+      }
+      return fetch(request)
         .then((response) => {
           if (response.ok) {
             const copy = response.clone();
-            void caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+            void caches.open(CACHE_NAME)
+              .then((cache) => cache.put(request, copy))
+              .catch(() => undefined);
           }
           return response;
-        })
-        .catch(() => cached);
-      return cached || network;
+        });
     }),
   );
 });

@@ -1,5 +1,8 @@
 const runtimeBundle = await import("./paddle-runtime.bundle.mjs");
 const { ort, PaddleOcrService } = runtimeBundle;
+const isMobileBrowser =
+  navigator.userAgentData?.mobile === true ||
+  /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
 
 const appBase = new URL("./", import.meta.url);
 const wasmUrl = new URL(
@@ -37,7 +40,7 @@ if (wasmBinary) {
 }
 
 async function loadWasmBinary() {
-  if (preferLocalModel || !("DecompressionStream" in globalThis)) {
+  if (preferLocalModel || isMobileBrowser || !("DecompressionStream" in globalThis)) {
     return null;
   }
   const cacheName = "judou-paddle-wasm-v1";
@@ -198,14 +201,21 @@ export async function initializePaddleOcr(
         ? "加载英文高精度 OCR 模型"
         : "加载多语言 OCR 模型",
     );
-    const [detection, recognition, charactersDictionary] = await Promise.all([
-      loadResource(profileConfig.model.detection, profileConfig.modelSizes.detection),
-      loadResource(profileConfig.model.recognition, profileConfig.modelSizes.recognition),
-      loadResource(
-        profileConfig.model.charactersDictionary,
-        profileConfig.modelSizes.charactersDictionary,
-      ),
-    ]);
+    const resources = [
+      [profileConfig.model.detection, profileConfig.modelSizes.detection],
+      [profileConfig.model.recognition, profileConfig.modelSizes.recognition],
+      [profileConfig.model.charactersDictionary, profileConfig.modelSizes.charactersDictionary],
+    ];
+    const buffers = isMobileBrowser
+      ? await (async () => {
+          const loaded = [];
+          for (const [url, size] of resources) {
+            loaded.push(await loadResource(url, size));
+          }
+          return loaded;
+        })()
+      : await Promise.all(resources.map(([url, size]) => loadResource(url, size)));
+    const [detection, recognition, charactersDictionary] = buffers;
     const candidate = new PaddleOcrService({
       model: {
         detection,
@@ -228,6 +238,9 @@ export async function initializePaddleOcr(
       if (!candidate.isInitialized()) {
         throw new Error("PaddleOCR sessions were not initialized");
       }
+      for (const [url] of resources) {
+        resourceCache.delete(url);
+      }
       services.set(profileName, candidate);
       onStage("PaddleOCR 已就绪");
       return candidate;
@@ -235,12 +248,25 @@ export async function initializePaddleOcr(
       initializationError = error;
       await candidate.destroy?.().catch(() => undefined);
       servicePromises.delete(profileName);
+      for (const [url] of resources) {
+        resourceCache.delete(url);
+      }
       throw error;
     }
   })();
 
   servicePromises.set(profileName, promise);
   return promise;
+}
+
+export async function releasePaddleOcr(profile = "multilingual") {
+  const profileName = PROFILES[profile] ? profile : "multilingual";
+  const service = services.get(profileName);
+  services.delete(profileName);
+  servicePromises.delete(profileName);
+  if (service) {
+    await service.destroy();
+  }
 }
 
 const resourceCache = new Map();
@@ -374,6 +400,7 @@ export async function recognizeWithPaddleOcr(
   onStage("检测文字区域");
   const result = await readyService.recognize(canvas, {
     ...PROFILES[profileName].recognition,
+    ...(isMobileBrowser ? { recBatchSize: 1 } : {}),
   });
   onStage("整理识别结果");
   return result;
