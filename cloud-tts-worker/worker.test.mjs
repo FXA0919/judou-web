@@ -25,9 +25,12 @@ function testEnvironment() {
   return {
     env: {
       ALLOWED_ORIGINS: "https://fxa0919.github.io",
-      AI: {
+        AI: {
         run: async (...args) => {
           calls.push(args);
+          if (args[0] === "@cf/meta/m2m100-1.2b") {
+            return { translated_text: "你好。" };
+          }
           return new Response(new Uint8Array([255, 251, 144, 100]), {
             headers: { "Content-Type": "audio/mpeg" },
           });
@@ -52,6 +55,14 @@ function speechRequest(text, voice = "female", origin = "https://fxa0919.github.
     method: "POST",
     headers: { Origin: origin, "Content-Type": "application/json", "CF-Connecting-IP": "203.0.113.9" },
     body: JSON.stringify({ text, voice }),
+  });
+}
+
+function translationRequest(text = "Hello.", source = "en", target = "zh-CN", origin = "https://fxa0919.github.io") {
+  return new Request("https://judou-voice.example/translate", {
+    method: "POST",
+    headers: { Origin: origin, "Content-Type": "application/json" },
+    body: JSON.stringify({ text, source, target }),
   });
 }
 
@@ -102,4 +113,20 @@ test("provider errors keep audio off the cache", async () => {
   };
   assert.equal((await worker.fetch(speechRequest("Hello"), env, ctx)).status, 502);
   assert.equal(calls.length, 1);
+});
+
+test("translates through Workers AI with CORS and validates requests", async () => {
+  const { env, ctx, calls } = testEnvironment();
+  const response = await worker.fetch(translationRequest(), env, ctx);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://fxa0919.github.io");
+  assert.equal((await response.json()).translatedText, "你好。");
+  assert.deepEqual(calls.at(-1), ["@cf/meta/m2m100-1.2b", {
+    text: "Hello.", source_lang: "en", target_lang: "zh",
+  }]);
+  assert.equal((await worker.fetch(translationRequest("x".repeat(401)), env, ctx)).status, 400);
+  assert.equal((await worker.fetch(translationRequest("Hello.", "en", "zh-CN", "https://evil.example"), env, ctx)).status, 403);
+  assert.equal((await worker.fetch(new Request("https://judou-voice.example/translate", {
+    method: "OPTIONS", headers: { Origin: "https://fxa0919.github.io" },
+  }), env, ctx)).status, 204);
 });

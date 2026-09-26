@@ -13,6 +13,7 @@
   const MAX_IMAGE_EDGE = MOBILE_OCR ? 1920 : 2400;
   const PADDLE_MAX_IMAGE_EDGE = MOBILE_OCR ? 1800 : 2800;
   const CLOUD_TTS_ENDPOINT = String(window.JUDOU_CLOUD_TTS_ENDPOINT || "").trim();
+  const TRANSLATION_GATEWAY = "https://judou-voice-gateway.pages.dev/translate";
   const CLOUD_VOICE_CACHE = "judou-cloud-voice-v1";
 
   const LANGUAGE_INFO = {
@@ -133,6 +134,8 @@
       completed: 0,
       total: 0,
       failures: 0,
+      unavailableEndpoints: new Set(),
+      serviceError: "",
     },
     grammar: {
       active: false,
@@ -1365,19 +1368,22 @@
     runtime.translation.completed = 0;
     runtime.translation.total = targets.length;
     runtime.translation.failures = 0;
+    runtime.translation.unavailableEndpoints.clear();
+    runtime.translation.serviceError = "";
     dom.translationStatus.hidden = false;
     dom.translateButtonLabel.textContent = "停止翻译";
     updateTranslationProgress();
 
     let cursor = 0;
     const worker = async () => {
-      while (cursor < targets.length && runtime.translation.active && token === runtime.translation.token) {
+      while (cursor < targets.length && runtime.translation.active &&
+          !runtime.translation.serviceError && token === runtime.translation.token) {
         const segment = targets[cursor];
         cursor += 1;
 
         try {
           const sourceCode = detectSentenceSource(segment.text);
-          const result = await translateText(segment.text, sourceCode, force);
+          const result = await translateText(segment.text, sourceCode);
           if (result && token === runtime.translation.token) {
             segment.translation = result;
             updateTranslationInput(segment);
@@ -1387,6 +1393,9 @@
         } catch (error) {
           console.warn("Translation failed", error);
           runtime.translation.failures += 1;
+          if (error?.name === "TranslationUnavailableError") {
+            runtime.translation.serviceError = error.message;
+          }
         }
 
         runtime.translation.completed += 1;
@@ -1411,6 +1420,8 @@
 
     if (wasStopped) {
       toast("翻译已停止", "warning");
+    } else if (runtime.translation.serviceError) {
+      toast(runtime.translation.serviceError, "error");
     } else if (runtime.translation.failures === targets.length) {
       toast("翻译服务不可用，可手动填写译文", "error");
     } else if (runtime.translation.failures) {
@@ -1437,14 +1448,14 @@
     }
   }
 
-  async function translateText(text, sourceCode, force) {
+  async function translateText(text, sourceCode) {
     const clean = text.trim();
     if (!clean) {
       return "";
     }
 
     const provider = project.settings.translationProvider;
-    const targetCode = sourceCode === "zh-CN" ? "en" : "zh-CN";
+    const targetCode = sourceCode === "chi_sim" || sourceCode === "zh-CN" ? "en" : "zh-CN";
 
     if (provider === "browser" || (provider === "auto" && !MOBILE_OCR)) {
       const browserResult = await translateWithBrowser(
@@ -1462,7 +1473,12 @@
     }
 
     if (provider === "auto" || provider === "mymemory") {
-      return translateWithMyMemory(clean, sourceCode, targetCode);
+      const chunks = splitTranslationText(clean);
+      const translated = [];
+      for (const chunk of chunks) {
+        translated.push(await translateWithMyMemory(chunk, sourceCode, targetCode));
+      }
+      return translated.join(targetCode === "zh-CN" ? "" : " ");
     }
 
     return "";
@@ -1506,20 +1522,92 @@
   async function translateWithMyMemory(text, sourceCode, targetCode) {
     const source = sourceCodeToMyMemory(sourceCode);
     const target = sourceCodeToMyMemory(targetCode);
+    const endpoints = MOBILE_OCR ? ["gateway", "direct"] : ["direct", "gateway"];
+    let lastError;
+    for (const endpoint of endpoints) {
+      if (runtime.translation.unavailableEndpoints.has(endpoint)) {
+        continue;
+      }
+      try {
+        return endpoint === "gateway"
+          ? await translateThroughGateway(text, source, target)
+          : await translateDirectly(text, source, target);
+      } catch (error) {
+        console.warn(`${endpoint} translation failed`, error);
+        runtime.translation.unavailableEndpoints.add(endpoint);
+        lastError = error;
+      }
+    }
+    const error = new Error(
+      lastError?.status === 429
+        ? "翻译服务额度已用完，已保留完成的译文，请稍后重试"
+        : "翻译服务暂不可用，已保留完成的译文，请稍后重试",
+    );
+    error.name = "TranslationUnavailableError";
+    throw error;
+  }
+
+  async function translateThroughGateway(text, source, target) {
+    const response = await fetchWithTimeout(TRANSLATION_GATEWAY, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, source, target }),
+    }, 11000);
+    if (!response.ok) {
+      const error = new Error(`Translation gateway HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    const payload = await response.json();
+    const result = String(payload?.translatedText || "").trim();
+    if (!result) {
+      throw new Error("Translation gateway returned no text");
+    }
+    return decodeHtmlEntities(result);
+  }
+
+  async function translateDirectly(text, source, target) {
     const url = new URL("https://api.mymemory.translated.net/get");
     url.searchParams.set("q", text);
     url.searchParams.set("langpair", `${source}|${target}`);
 
-    const response = await fetchWithTimeout(url.toString(), {}, 12000);
+    const response = await fetchWithTimeout(url.toString(), {}, 10000);
     if (!response.ok) {
-      throw new Error(`Translation HTTP ${response.status}`);
+      const error = new Error(`Translation HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
     }
     const payload = await response.json();
-    if (payload.responseStatus && Number(payload.responseStatus) >= 400) {
-      throw new Error(payload.responseDetails || "Translation request failed");
+    if (payload.quotaFinished || (payload.responseStatus && Number(payload.responseStatus) >= 400)) {
+      const error = new Error(payload.responseDetails || "Translation request failed");
+      error.status = 429;
+      throw error;
     }
     const result = payload.responseData?.translatedText;
-    return typeof result === "string" ? decodeHtmlEntities(result).trim() : "";
+    if (typeof result !== "string" || !result.trim()) {
+      throw new Error("Translation service returned no text");
+    }
+    return decodeHtmlEntities(result).trim();
+  }
+
+  function splitTranslationText(text) {
+    const chunks = [];
+    let remaining = text.trim();
+    while (remaining.length > 400) {
+      let boundary = -1;
+      for (const separator of [" ", ".", "!", "?", "。", "！", "？", ";", "；"]) {
+        boundary = Math.max(boundary, remaining.lastIndexOf(separator, 399));
+      }
+      const end = boundary >= 200
+        ? boundary + (/\s/.test(remaining[boundary]) ? 0 : 1)
+        : 400;
+      chunks.push(remaining.slice(0, end).trim());
+      remaining = remaining.slice(end).trim();
+    }
+    if (remaining) {
+      chunks.push(remaining);
+    }
+    return chunks;
   }
 
   async function correctSegmentGrammar({

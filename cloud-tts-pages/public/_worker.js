@@ -15,7 +15,7 @@ function failure(message, status, request) {
 export default {
   async fetch(request, env) {
     const path = new URL(request.url).pathname;
-    if (path !== "/health" && path !== "/synthesize") {
+    if (path !== "/health" && path !== "/synthesize" && path !== "/translate") {
       return new Response("Judou voice gateway", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });

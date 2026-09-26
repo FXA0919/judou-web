@@ -4,7 +4,9 @@ const VOICES = Object.freeze({
   girl: "iris",
 });
 const MODEL = "@cf/deepgram/aura-2-en";
+const TRANSLATION_MODEL = "@cf/meta/m2m100-1.2b";
 const MAX_TEXT_LENGTH = 1200;
+const MAX_TRANSLATION_LENGTH = 400;
 const CACHE_SECONDS = 7 * 24 * 60 * 60;
 
 function allowedOrigin(request, env) {
@@ -49,6 +51,55 @@ function audioResponse(source, origin) {
     headers.set(name, value);
   }
   return new Response(source.body, { status: 200, headers });
+}
+
+function translationResponse(text, origin) {
+  return new Response(JSON.stringify({ translatedText: text }), {
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      ...corsHeaders(origin),
+    },
+  });
+}
+
+async function translateText(request, env, origin) {
+  if (!env.AI) {
+    return jsonError("Translation service is not configured", 503, origin);
+  }
+  if (!String(request.headers.get("Content-Type") || "").toLowerCase().startsWith("application/json")) {
+    return jsonError("Expected JSON", 415, origin);
+  }
+  let input;
+  try {
+    input = await readJsonLimited(request, 3000);
+  } catch (error) {
+    return jsonError(error instanceof RangeError ? "Request too large" : "Invalid JSON", error instanceof RangeError ? 413 : 400, origin);
+  }
+  const text = String(input?.text || "").replace(/\s+/g, " ").trim();
+  const source = String(input?.source || "").replace(/-[A-Z]+$/, "");
+  const target = String(input?.target || "").replace(/-[A-Z]+$/, "");
+  const languages = new Set(["en", "zh", "ja", "ko", "fr", "de", "es", "ru", "ar"]);
+  if (!text || text.length > MAX_TRANSLATION_LENGTH || !languages.has(source) || !languages.has(target) || source === target) {
+    return jsonError("Invalid translation request", 400, origin);
+  }
+  let result;
+  try {
+    result = await env.AI.run(TRANSLATION_MODEL, {
+      text,
+      source_lang: source,
+      target_lang: target,
+    });
+  } catch {
+    return jsonError("Translation provider unavailable", 502, origin);
+  }
+  const translated = typeof result === "string"
+    ? result
+    : result?.translated_text || result?.translatedText || result?.translation || "";
+  if (!String(translated).trim()) {
+    return jsonError("Translation provider returned no text", 502, origin);
+  }
+  return translationResponse(String(translated).trim(), origin);
 }
 
 function dailyLimit(value, fallback) {
@@ -117,7 +168,7 @@ export default {
         headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
       });
     }
-    if (url.pathname !== "/synthesize") {
+    if (url.pathname !== "/synthesize" && url.pathname !== "/translate") {
       return jsonError("Not found", 404);
     }
     const origin = allowedOrigin(request, env);
@@ -129,6 +180,9 @@ export default {
     }
     if (request.method !== "POST") {
       return jsonError("Method not allowed", 405, origin);
+    }
+    if (url.pathname === "/translate") {
+      return translateText(request, env, origin);
     }
     if (!String(request.headers.get("Content-Type") || "").toLowerCase().startsWith("application/json")) {
       return jsonError("Expected JSON", 415, origin);
