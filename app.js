@@ -159,6 +159,8 @@
     cloud: {
       loading: false,
       requests: new Map(),
+      disabledUntil: 0,
+      failureMessage: "",
     },
     player: {
       state: "idle",
@@ -462,6 +464,8 @@
     dom.voiceSelect.addEventListener("change", () => {
       stopPlayback();
       project.settings.voiceURI = dom.voiceSelect.value;
+      runtime.cloud.disabledUntil = 0;
+      runtime.cloud.failureMessage = "";
       runtime.neural.prefetchIndex = -1;
       runtime.neural.prefetchPromise = null;
       runtime.neural.prefetchToken += 1;
@@ -2632,6 +2636,11 @@
       return;
     }
     if (isCloudVoiceValue(project.settings.voiceURI) && CLOUD_TTS_ENDPOINT) {
+      if (runtime.cloud.disabledUntil > Date.now()) {
+        dom.voiceStatus.textContent = runtime.cloud.failureMessage;
+        dom.voiceStatus.classList.add("is-warning");
+        return;
+      }
       dom.voiceStatus.textContent = "在线自然语音已选择 · 英文句子会发送至语音服务";
       dom.voiceStatus.classList.remove("is-warning");
       return;
@@ -2669,6 +2678,8 @@
       ? "cloud"
       : "system";
     project.settings.voiceURI = `${provider}:${value}`;
+    runtime.cloud.disabledUntil = 0;
+    runtime.cloud.failureMessage = "";
     dom.voiceSelect.value = project.settings.voiceURI;
     runtime.neural.prefetchIndex = -1;
     runtime.neural.prefetchPromise = null;
@@ -2758,6 +2769,7 @@
     }
 
     if (CLOUD_TTS_ENDPOINT && isCloudVoiceValue(project.settings.voiceURI) &&
+        runtime.cloud.disabledUntil <= Date.now() &&
         detectSentenceSource(segment.text) === "eng") {
       try {
         await speakCloudSegment(segment, token);
@@ -2768,7 +2780,11 @@
         }
         runtime.cloud.loading = false;
         console.warn("Online speech failed", error);
-        toast("在线语音暂不可用，已尝试设备语音", "warning");
+        const failure = describeCloudVoiceFailure(error);
+        runtime.cloud.disabledUntil = failure.disabledUntil;
+        runtime.cloud.failureMessage = failure.message;
+        toast(failure.message, "warning");
+        updateVoiceStatus();
         renderPlayer();
       }
     }
@@ -2851,11 +2867,41 @@
     renderPlayer();
     await audioContext.resume();
     source.start();
+    if (runtime.cloud.failureMessage) {
+      runtime.cloud.disabledUntil = 0;
+      runtime.cloud.failureMessage = "";
+      updateVoiceStatus();
+    }
     const next = project.segments[runtime.player.currentIndex + 1];
     if (next && detectSentenceSource(next.text) === "eng") {
       void getCloudAudioBlob(next.text, getCloudVoiceKey(project.settings.voiceURI))
         .catch(() => undefined);
     }
+  }
+
+  function describeCloudVoiceFailure(error) {
+    const message = String(error?.message || error || "");
+    const retrySoon = Date.now() + 60_000;
+    if (error?.status === 429 && /daily voice limit/i.test(message)) {
+      const now = new Date();
+      return {
+        message: "今日在线语音额度已用完，已切换设备语音",
+        disabledUntil: Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1) + 5000,
+      };
+    }
+    if (error?.status === 429 || error?.status === 502 || error?.status === 503) {
+      return { message: "在线语音服务暂时繁忙，已切换设备语音", disabledUntil: retrySoon };
+    }
+    if (error?.name === "AbortError" || /timeout|timed out/i.test(message)) {
+      return { message: "在线语音连接超时，已切换设备语音", disabledUntil: retrySoon };
+    }
+    if (error instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(message)) {
+      return { message: "手机无法连接在线语音地址，已切换设备语音", disabledUntil: retrySoon };
+    }
+    if (/invalid audio|decode|encoding/i.test(message) || error?.name === "EncodingError") {
+      return { message: "手机浏览器无法播放在线音频，已切换设备语音", disabledUntil: retrySoon };
+    }
+    return { message: "在线语音暂不可用，已切换设备语音", disabledUntil: retrySoon };
   }
 
   async function getCloudAudioBlob(text, voice) {
@@ -2897,7 +2943,15 @@
         window.clearTimeout(timeout);
       }
       if (!response.ok) {
-        throw new Error(`Online voice returned ${response.status}`);
+        let details = "";
+        try {
+          details = String((await response.json())?.error || "");
+        } catch {
+          // The service may return a non-JSON error page.
+        }
+        const error = new Error(details || `Online voice returned ${response.status}`);
+        error.status = response.status;
+        throw error;
       }
       const blob = await response.blob();
       if (!blob.size || !String(response.headers.get("Content-Type") || "").includes("audio/")) {

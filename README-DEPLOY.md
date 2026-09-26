@@ -23,7 +23,7 @@
 
 部分普通静态托管平台对单个文件大小有限制，而本项目中的 OCR 和语音模型超过 80 MB，部署前需要确认平台限制。
 
-GitHub Pages 可供其他人的手机直接打开使用，当前公开地址为 `https://fxa0919.github.io/judou-web/`。它不能保管付费语音服务的密钥。若要启用在线自然语音，请另行部署 `cloud-tts-worker/`，并在 `voice-config.js` 填写其 `/synthesize` 地址。未配置时网页继续使用设备语音。
+GitHub Pages 可供其他人的手机直接打开使用，当前公开地址为 `https://fxa0919.github.io/judou-web/`。在线自然语音由 `cloud-tts-worker/` 生成；`cloud-tts-pages/` 提供可选的 `pages.dev` 网关，供打不开 `workers.dev` 的手机使用。在 `voice-config.js` 填写可访问的 `/synthesize` 地址。未配置时网页继续使用设备语音。
 
 ## 支持自定义响应头的托管
 

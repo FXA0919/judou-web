@@ -33,7 +33,7 @@
 - 配置 `voice-config.js` 和 `cloud-tts-worker/` 后，新项目默认使用在线神经语音。网页预取下一句，并在浏览器缓存最近的生成结果；在线服务出错时尝试系统语音。
 - 服务启用跨域隔离，让 ONNX Runtime 使用多线程 WASM。
 - 公网无法启用跨域隔离时，会自动预载 OCR 单文件运行时并缓存模型。
-- 系统语音由浏览器本地即时合成。在线语音需要 Azure Speech 和 Cloudflare Worker 账号，部署说明见 `cloud-tts-worker/README.md`。
+- 系统语音由浏览器本地即时合成。在线语音使用 Cloudflare Workers AI；若手机网络无法访问 `workers.dev`，可通过 `cloud-tts-pages/` 网关使用 `pages.dev` 地址。部署说明见 `cloud-tts-worker/README.md` 和 `cloud-tts-pages/README.md`。
 - 项目保存在当前浏览器的 IndexedDB 中，可手动删除。
 - OCR 或语法校对前会检查本地服务；服务停止时会提示重新运行 `start.ps1`。
 

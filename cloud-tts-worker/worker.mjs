@@ -170,7 +170,7 @@ export default {
         ipHash,
         chars: text.length,
         totalLimit: dailyLimit(env.DAILY_CHAR_LIMIT, 3000),
-        ipLimit: dailyLimit(env.DAILY_IP_CHAR_LIMIT, 1000),
+        ipLimit: dailyLimit(env.DAILY_IP_CHAR_LIMIT, 3000),
       }),
     });
     if (!quota.ok) {

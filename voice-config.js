@@ -1,3 +1,3 @@
-// Set this to the public /synthesize URL of the deployed voice Worker.
+// Public Pages gateway for the deployed voice Worker.
 // Keep provider keys in the Worker. Never put a Speech key in this file.
-window.JUDOU_CLOUD_TTS_ENDPOINT = "https://judou-voice.judou-web-voice.workers.dev/synthesize";
+window.JUDOU_CLOUD_TTS_ENDPOINT = "https://judou-voice-gateway.pages.dev/synthesize";
