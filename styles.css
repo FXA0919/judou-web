@@ -967,6 +967,8 @@ textarea:hover,
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr);
   overflow: hidden;
+  content-visibility: auto;
+  contain-intrinsic-size: 190px;
   background: var(--surface-strong);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1362,6 +1364,8 @@ textarea:hover,
   gap: 10px;
   width: 100%;
   padding: 12px 12px 12px 7px;
+  content-visibility: auto;
+  contain-intrinsic-size: 54px;
   text-align: left;
   background: rgba(255, 253, 248, 0.72);
   border: 1px solid var(--line);

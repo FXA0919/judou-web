@@ -10,8 +10,18 @@
   const MOBILE_OCR =
     navigator.userAgentData?.mobile === true ||
     /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
-  const MAX_IMAGE_EDGE = MOBILE_OCR ? 1920 : 2400;
-  const PADDLE_MAX_IMAGE_EDGE = MOBILE_OCR ? 1800 : 2800;
+  const DEVICE_MEMORY_GB = Number(navigator.deviceMemory) || 0;
+  const LOW_MEMORY_MOBILE = MOBILE_OCR && (
+    (DEVICE_MEMORY_GB > 0 && DEVICE_MEMORY_GB <= 4) ||
+    (Number(navigator.hardwareConcurrency) > 0 && navigator.hardwareConcurrency <= 4)
+  );
+  // Keep the peak canvas and model memory below the level where mobile browsers
+  // terminate the tab. A 1280px source is still sufficient for normal phone
+  // photos while cutting the temporary RGBA buffer by more than half.
+  const MAX_IMAGE_EDGE = MOBILE_OCR ? (LOW_MEMORY_MOBILE ? 1280 : 1680) : 2400;
+  const PADDLE_MAX_IMAGE_EDGE = MOBILE_OCR ? (LOW_MEMORY_MOBILE ? 1280 : 1600) : 2800;
+  const MOBILE_AUTO_GRAMMAR_LIMIT = LOW_MEMORY_MOBILE ? 24 : 48;
+  const MOBILE_AUTO_TRANSLATION_LIMIT = LOW_MEMORY_MOBILE ? 80 : 140;
   const CLOUD_TTS_ENDPOINT = String(window.JUDOU_CLOUD_TTS_ENDPOINT || "").trim();
   const TRANSLATION_GATEWAY = "https://judou-voice-gateway.pages.dev/translate";
   const CLOUD_VOICE_CACHE = "judou-cloud-voice-v1";
@@ -159,6 +169,11 @@
       prepareToken: 0,
       prefetchToken: 0,
     },
+    stability: {
+      guardInstalled: false,
+      lastError: "",
+      lastErrorAt: 0,
+    },
     cloud: {
       loading: false,
       requests: new Map(),
@@ -193,6 +208,7 @@
 
   async function init() {
     cacheDom();
+    installRuntimeGuards();
     bindStaticEvents();
     registerServiceWorker();
     await openDatabase();
@@ -494,8 +510,64 @@
       if (hasSystemSpeech()) {
         window.speechSynthesis.cancel();
       }
-      runtime.ocr.worker?.terminate();
+      void releaseOcrResources();
+      void releaseGrammarModel();
     });
+    window.addEventListener("pagehide", () => {
+      stopPlayback();
+      releasePreviewObjectUrl();
+      void releaseOcrResources();
+      void releaseGrammarModel();
+    }, { once: true });
+  }
+
+  function installRuntimeGuards() {
+    if (runtime.stability.guardInstalled) {
+      return;
+    }
+    runtime.stability.guardInstalled = true;
+
+    const report = (reason) => {
+      const message = String(reason?.message || reason || "").trim();
+      if (!message || /AbortError|canceled|interrupted/i.test(message)) {
+        return;
+      }
+      const now = Date.now();
+      if (runtime.stability.lastError === message && now - runtime.stability.lastErrorAt < 2000) {
+        return;
+      }
+      runtime.stability.lastError = message;
+      runtime.stability.lastErrorAt = now;
+      console.warn("Recovered from an unexpected page error", reason);
+
+      const wasBusy = runtime.ocr.active || runtime.grammar.active || runtime.translation.active;
+      if (runtime.ocr.active) {
+        runtime.ocr.active = false;
+        void releaseOcrResources();
+      }
+      if (runtime.grammar.active) {
+        runtime.grammar.active = false;
+        runtime.grammar.token += 1;
+        void releaseGrammarModel();
+      }
+      if (runtime.translation.active) {
+        runtime.translation.active = false;
+        runtime.translation.token += 1;
+      }
+      if (wasBusy && dom.processBtn) {
+        dom.processBtn.disabled = !project.pages.length;
+        dom.processBtn.querySelector("span").textContent = "开始识别";
+        dom.grammarStatus.hidden = true;
+        dom.translationStatus.hidden = true;
+        dom.grammarButtonLabel.textContent = "保守校对";
+        dom.translateButtonLabel.textContent = "自动翻译";
+        scheduleSave();
+        toast("页面遇到临时错误，当前内容已保留，请稍后重试", "warning");
+      }
+    };
+
+    window.addEventListener("error", (event) => report(event.error || event.message));
+    window.addEventListener("unhandledrejection", (event) => report(event.reason));
   }
 
   async function openDatabase() {
@@ -982,6 +1054,7 @@
     runtime.ocr.active = true;
     runtime.ocr.pageCount = project.pages.length;
     runtime.ocr.localProgress = 0;
+    runtime.ocr.engineUsed = "";
     dom.processBtn.disabled = true;
     dom.processBtn.querySelector("span").textContent = "正在识别";
     setOCRProgress(0, "准备识别");
@@ -1012,24 +1085,9 @@
 
       runtime.ocr.engineUsed = engine;
       if (engine === "paddle") {
-        try {
-          await runPaddleOcrPipeline();
-        } finally {
-          if (MOBILE_OCR) {
-            const paddle = await loadPaddleOcrModule();
-            await paddle.releasePaddleOcr(getPaddleProfile());
-          }
-        }
+        await runPaddleOcrPipeline();
       } else {
-        try {
-          await runTesseractOcrPipeline();
-        } finally {
-          if (MOBILE_OCR && runtime.ocr.worker) {
-            await runtime.ocr.worker.terminate();
-            runtime.ocr.worker = null;
-            runtime.ocr.language = "";
-          }
-        }
+        await runTesseractOcrPipeline();
       }
 
       const reconstructedDocument = window.TextPipeline.fromDocumentPages(project.pages);
@@ -1048,10 +1106,18 @@
       toast(`${engineLabel} 识别完成，共 ${project.segments.length} 句`, "success");
 
       postOcrTask = () => {
-        if (project.settings.grammarCheck) {
+        if (project.settings.grammarCheck &&
+          (!MOBILE_OCR || project.segments.length <= MOBILE_AUTO_GRAMMAR_LIMIT)) {
           return correctSegmentGrammar({ force: true, silent: true, translateAfter: true });
         }
+        if (project.settings.grammarCheck && MOBILE_OCR) {
+          toast(`句子较多，已跳过自动校对以保护手机内存；可在校对页手动开始`, "warning");
+        }
         if (project.settings.autoTranslate && !isChineseSource(project.settings.ocrLanguage)) {
+          if (MOBILE_OCR && project.segments.length > MOBILE_AUTO_TRANSLATION_LIMIT) {
+            toast("句子较多，已跳过自动翻译以保护手机内存；可在校对页手动开始", "warning");
+            return Promise.resolve();
+          }
           return translateMissingSegments();
         }
         return Promise.resolve();
@@ -1060,6 +1126,10 @@
       console.error("OCR initialization failed", error);
       toast(friendlyOcrError(error), "error");
     } finally {
+      // Release OCR memory before loading the grammar/translation stage. This
+      // is deliberately done on desktop too: retaining a WASM worker while
+      // rendering and correcting text creates an avoidable memory peak.
+      await releaseOcrResources();
       runtime.ocr.active = false;
       dom.processBtn.disabled = !project.pages.length;
       dom.processBtn.querySelector("span").textContent = "开始识别";
@@ -1085,12 +1155,35 @@
 
   function loadPaddleOcrModule() {
     if (!runtime.ocr.paddleModulePromise) {
-      runtime.ocr.paddleModulePromise = import("./paddle-ocr.mjs?v=mobile-ocr-v1").catch((error) => {
+      runtime.ocr.paddleModulePromise = import("./paddle-ocr.mjs?v=mobile-ocr-v2").catch((error) => {
         runtime.ocr.paddleModulePromise = null;
         throw error;
       });
     }
     return runtime.ocr.paddleModulePromise;
+  }
+
+  async function releaseOcrResources() {
+    const worker = runtime.ocr.worker;
+    runtime.ocr.worker = null;
+    runtime.ocr.language = "";
+    if (worker) {
+      try {
+        await worker.terminate();
+      } catch (error) {
+        console.warn("Failed to terminate OCR worker", error);
+      }
+    }
+
+    if (runtime.ocr.engineUsed === "paddle" && runtime.ocr.paddleModulePromise) {
+      try {
+        const paddle = await runtime.ocr.paddleModulePromise;
+        await paddle.releasePaddleOcr(getPaddleProfile());
+      } catch (error) {
+        console.warn("Failed to release PaddleOCR", error);
+      }
+    }
+    runtime.ocr.engineUsed = "";
   }
 
   function loadScriptOnce(url) {
@@ -1199,6 +1292,9 @@
 
       setOCRProgress((index + 1) / project.pages.length, `已完成第 ${index + 1} / ${project.pages.length} 张`);
       renderPages();
+      if (MOBILE_OCR) {
+        await yieldToBrowser(40);
+      }
     }
   }
 
@@ -1244,6 +1340,9 @@
 
       setOCRProgress((index + 1) / project.pages.length, `已完成第 ${index + 1} / ${project.pages.length} 张`);
       renderPages();
+      if (MOBILE_OCR) {
+        await yieldToBrowser(40);
+      }
     }
   }
 
@@ -1684,7 +1783,9 @@
         updateGrammarProgress();
         updateSegmentTextInput(segment);
         if ((index + 1) % 8 === 0) {
-          await sleep(0);
+          await yieldToBrowser(MOBILE_OCR ? 24 : 0);
+        } else if (MOBILE_OCR) {
+          await yieldToBrowser(LOW_MEMORY_MOBILE ? 12 : 4);
         }
       }
 
@@ -1775,7 +1876,7 @@
   }
 
   async function createGrammarWorkerClient() {
-    const worker = new Worker(new URL("./grammar-worker.mjs?v=layout-v2", window.location.href), {
+    const worker = new Worker(new URL("./grammar-worker.mjs?v=layout-v3", window.location.href), {
       type: "module",
     });
     const pending = new Map();
@@ -2147,7 +2248,9 @@
 
   async function createThumbnail(file) {
     const bitmap = await loadBitmap(file);
-    const scale = Math.min(1, 760 / Math.max(bitmap.width, bitmap.height));
+    const thumbnailEdge = MOBILE_OCR ? 480 : 760;
+    const thumbnailQuality = MOBILE_OCR ? 0.68 : 0.8;
+    const scale = Math.min(1, thumbnailEdge / Math.max(bitmap.width, bitmap.height));
     const width = Math.max(1, Math.round(bitmap.width * scale));
     const height = Math.max(1, Math.round(bitmap.height * scale));
     const source = bitmap.source || bitmap;
@@ -2160,7 +2263,7 @@
     context.drawImage(source, 0, 0, width, height);
     bitmap.close?.();
     try {
-      return canvasToDataUrl(canvas, "image/jpeg", 0.8);
+      return canvasToDataUrl(canvas, "image/jpeg", thumbnailQuality);
     } finally {
       canvas.width = 0;
       canvas.height = 0;
@@ -3777,6 +3880,17 @@
 
   function sleep(ms) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function yieldToBrowser(delay = 0) {
+    return new Promise((resolve) => {
+      const finish = () => window.setTimeout(resolve, Math.max(0, delay));
+      if (!delay && typeof window.requestAnimationFrame === "function") {
+        window.requestAnimationFrame(finish);
+      } else {
+        finish();
+      }
+    });
   }
 
   function decodeHtmlEntities(value) {

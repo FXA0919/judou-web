@@ -267,6 +267,11 @@ export async function releasePaddleOcr(profile = "multilingual") {
   if (service) {
     await service.destroy();
   }
+  // The resource cache stores full ArrayBuffers for the detector and
+  // recognizer. Keeping those buffers after destroying the ONNX service can
+  // retain tens of megabytes on a phone and make the next grammar stage push
+  // the browser over its memory limit.
+  resourceCache.clear();
 }
 
 const resourceCache = new Map();
