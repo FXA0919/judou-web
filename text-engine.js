@@ -87,19 +87,12 @@
       const items = (Array.isArray(group) ? group : [group]).filter(
         (item) => item?.text && String(item.text).trim(),
       );
-      if (!items.length) {
-        return;
-      }
-
-      const text = joinRecognizedItems(items);
-      if (!text) {
-        return;
-      }
-
-      lines.push({
-        text,
-        confidence: weightedConfidence(items),
-        box: unionBoxes(items.map((item) => item.box).filter(Boolean)),
+      items.forEach((item) => {
+        lines.push({
+          text: cleanInlineText(item.text),
+          confidence: normalizeConfidence(item.confidence),
+          box: normalizeBox(item.box),
+        });
       });
     });
 
@@ -126,15 +119,16 @@
       paragraphs.forEach((paragraph) => {
         const paragraphLines = Array.isArray(paragraph?.lines) ? paragraph.lines : [];
         paragraphLines.forEach((line) => {
-          const text = cleanInlineText(line?.text || "");
-          if (!text) {
-            return;
-          }
-          lines.push({
-            text,
-            confidence: Number.isFinite(line?.confidence) ? line.confidence / 100 : null,
-            box: convertTesseractBox(line?.bbox),
-            paragraph: paragraphIndex,
+          splitTesseractLine(line).forEach((part) => {
+            const text = cleanInlineText(part.text || "");
+            if (text) {
+              lines.push({
+                text,
+                confidence: normalizeConfidence(part.confidence),
+                box: part.box,
+                paragraph: paragraphIndex,
+              });
+            }
           });
         });
         paragraphIndex += 1;
@@ -199,7 +193,7 @@
 
     entries.forEach((entry) => {
       const ordered = orderPageLines(entry.lines.filter((line) => !line.remove));
-      const pageDocument = buildDocument(ordered, false);
+      const pageDocument = buildDocument(repairLostSentenceEnds(ordered), false);
       let pageParagraphCount = 0;
       pageDocument.lines.forEach((line) => {
         pageParagraphCount = Math.max(pageParagraphCount, line.paragraph + 1);
@@ -287,7 +281,7 @@
     const columnMode = detectColumnMode(lines, pageWidth);
     const sorted = columnMode
       ? orderByColumns(lines, pageWidth)
-      : [...lines].sort(compareByPosition);
+      : orderByRows(lines);
     return sorted;
   }
 
@@ -348,12 +342,200 @@
 
   function orderColumnSection(lines, pageWidth) {
     const left = lines
-      .filter((line) => !line.box || centerX(line.box) <= pageWidth * 0.5)
-      .sort(compareByPosition);
+      .filter((line) => !line.box || centerX(line.box) <= pageWidth * 0.5);
     const right = lines
-      .filter((line) => line.box && centerX(line.box) > pageWidth * 0.5)
-      .sort(compareByPosition);
-    return [...left, ...right];
+      .filter((line) => line.box && centerX(line.box) > pageWidth * 0.5);
+    return [
+      ...trimColumnLabels(orderByRows(left), pageWidth),
+      ...trimColumnLabels(orderByRows(right), pageWidth),
+    ];
+  }
+
+  function orderByRows(lines) {
+    const heights = lines.map((line) => line.box?.height)
+      .filter((height) => Number.isFinite(height) && height > 0);
+    const rowTolerance = Math.max(8, (median(heights) || 18) * 0.72);
+    const rows = [];
+    [...lines].sort(compareByPosition).forEach((line) => {
+      if (!line.box) {
+        rows.push([line]);
+        return;
+      }
+      const center = line.box.y + line.box.height / 2;
+      let row;
+      for (let index = rows.length - 1; index >= 0; index -= 1) {
+        const items = rows[index];
+        const anchor = items[0].box;
+        if (anchor && Math.abs(center - (anchor.y + anchor.height / 2)) <= rowTolerance) {
+          row = items;
+          break;
+        }
+      }
+      if (row) {
+        row.push(line);
+      } else {
+        rows.push([line]);
+      }
+    });
+    return rows.flatMap((row) => row.sort((left, right) =>
+      (left.box?.x ?? 0) - (right.box?.x ?? 0),
+    ));
+  }
+
+  function trimColumnLabels(lines, pageWidth) {
+    if (lines.length < 8) {
+      return lines;
+    }
+    const isBodyLine = (line) => line.text.replace(/[^\p{L}]/gu, "").length >= 24;
+    let firstBody = -1;
+    for (let index = 0; index <= lines.length - 4; index += 1) {
+      if (lines.slice(index, index + 4).filter(isBodyLine).length >= 3) {
+        firstBody = index;
+        break;
+      }
+    }
+    if (firstBody < 0) {
+      return lines;
+    }
+
+    const prefixSpan = lines[firstBody].box?.y - lines[0].box?.y;
+    const prefixIsLabels =
+      (firstBody >= 3 && prefixSpan > 50) ||
+      (firstBody > 0 && prefixSpan > 80 &&
+        lines.slice(0, firstBody).every((line) =>
+          !isBodyLine(line) && !TERMINAL_RE.test(line.text)));
+    let start = prefixIsLabels ? firstBody : 0;
+    if (prefixIsLabels) {
+      while (start < lines.length && !isBodyLine(lines[start]) &&
+        !TERMINAL_RE.test(lines[start].text)) {
+        start += 1;
+      }
+    }
+    const heading = prefixIsLabels && start > 0 ? lines[start - 1] : null;
+    const headingGap = heading?.box && lines[start]?.box
+      ? lines[start].box.y - heading.box.y - heading.box.height
+      : Number.POSITIVE_INFINITY;
+    const keepHeading = heading && headingGap >= 0 &&
+      headingGap < Math.max(24, lines[start].box.height * 1.5) &&
+      /^[A-Z][a-z]+(?:\s+[a-z]+){2,}$/.test(heading.text) &&
+      heading.text.replace(/[^\p{L}]/gu, "").length >= 14;
+    const body = keepHeading
+      ? [{ ...heading, text: `${heading.text}.` }, ...lines.slice(start)]
+      : lines.slice(start);
+    const lineSteps = body
+      .slice(1)
+      .map((line, index) => line.box?.y - body[index].box?.y)
+      .filter((step) => Number.isFinite(step) && step > 0 && step < 80);
+    const typicalStep = median(lineSteps) || 28;
+    let lastLongIndex = -1;
+    for (let index = 0; index < body.length; index += 1) {
+      if (isBodyLine(body[index])) {
+        lastLongIndex = index;
+      }
+    }
+    let end = body.length;
+    for (let index = lastLongIndex + 1; index < body.length; index += 1) {
+      const gap = body[index].box?.y - body[index - 1].box?.y;
+      if (Number.isFinite(gap) && gap > Math.max(40, typicalStep * 1.5)) {
+        end = index;
+        break;
+      }
+    }
+    const trimmed = body.slice(0, end);
+    const columnBaseX = median(body.filter(isBodyLine).map((line) => line.box?.x));
+    return trimmed.filter((line, index) => {
+      if (index <= lastLongIndex) {
+        return true;
+      }
+      const letters = line.text.replace(/[^\p{L}]/gu, "").length;
+      if (letters >= 24 || TERMINAL_RE.test(line.text) || !line.box) {
+        return true;
+      }
+      const sameRow = trimmed.filter((other) =>
+        other !== line && other.box &&
+        Math.abs(other.box.y - line.box.y) < Math.max(12, typicalStep * 0.55) &&
+        Math.abs(other.box.x - line.box.x) > pageWidth * 0.15,
+      );
+      if (!sameRow.length) {
+        return true;
+      }
+      const prior = trimmed.filter((other) =>
+        other.box && other.box.y < line.box.y - typicalStep * 0.55 &&
+        other.box.y >= line.box.y - typicalStep * 3,
+      );
+      if (!prior.length) {
+        return true;
+      }
+      const baselineX = median(prior.map((other) => other.box.x));
+      if (baselineX - columnBaseX < pageWidth * 0.15 ||
+        line.box.x >= baselineX - pageWidth * 0.1) {
+        return true;
+      }
+      return !sameRow.some((other) =>
+        Math.abs(other.box.x - baselineX) + pageWidth * 0.1 <
+        Math.abs(line.box.x - baselineX),
+      );
+    });
+  }
+
+  function repairLostSentenceEnds(lines) {
+    const repaired = lines.map((line) => ({ ...line }));
+    for (let index = 1; index < repaired.length; index += 1) {
+      const previous = repaired[index - 1];
+      const current = repaired[index];
+      if (!previous.box || !current.box ||
+        !/^["'“‘]?(?:[A-Z][a-z]|[AI](?=\s))/.test(current.text) ||
+        /[.!?。！？,，;；:：-]$/.test(previous.text)) {
+        continue;
+      }
+      const step = current.box.y - previous.box.y;
+      const lineHeight = Math.max(previous.box.height, current.box.height, 12);
+      const columnReset = step < -lineHeight * 4 &&
+        current.box.x > previous.box.x + lineHeight * 3;
+      const sameRowGap = Math.abs(step) <= lineHeight * 0.55 &&
+        current.box.x > previous.box.x + previous.box.width + lineHeight * 0.3;
+      if ((step > lineHeight * 0.55 && step < lineHeight * 4) ||
+        columnReset || sameRowGap) {
+        previous.text += ".";
+      }
+    }
+    return repaired;
+  }
+
+  function splitTesseractLine(line) {
+    const words = (Array.isArray(line?.words) ? line.words : [])
+      .filter((word) => word?.text && convertTesseractBox(word.bbox))
+      .sort((left, right) => left.bbox.x0 - right.bbox.x0);
+    if (words.length < 2) {
+      return [{
+        text: line?.text || "",
+        confidence: line?.confidence,
+        box: convertTesseractBox(line?.bbox),
+      }];
+    }
+    const wordHeight = median(words.map((word) => word.bbox.y1 - word.bbox.y0)) || 18;
+    const gapThreshold = Math.max(28, wordHeight * 1.5);
+    const groups = [[words[0]]];
+    words.slice(1).forEach((word) => {
+      const group = groups[groups.length - 1];
+      const last = group[group.length - 1];
+      if (word.bbox.x0 - last.bbox.x1 > gapThreshold) {
+        groups.push([]);
+      }
+      groups[groups.length - 1].push(word);
+    });
+    if (groups.length === 1) {
+      return [{
+        text: line.text,
+        confidence: line.confidence,
+        box: convertTesseractBox(line.bbox),
+      }];
+    }
+    return groups.map((group) => ({
+      text: group.map((word) => word.text).join(" "),
+      confidence: weightedConfidence(group),
+      box: unionBoxes(group.map((word) => convertTesseractBox(word.bbox))),
+    }));
   }
 
   function compareByPosition(left, right) {
@@ -449,12 +631,17 @@
     const previousBottom = previous.box.y + previous.box.height;
     const verticalGap = current.box.y - previousBottom;
     const indentation = Math.abs(current.box.x - previous.box.x);
-    if (verticalGap >= Math.max(12, medianHeight * 0.82)) {
+    if (current.box.y < previous.box.y - medianHeight * 2 &&
+      TERMINAL_RE.test(previous.text)) {
+      return true;
+    }
+    if (verticalGap >= Math.max(20, medianHeight * 1.3)) {
       return true;
     }
     if (
+      current.box.y - previous.box.y > medianHeight * 0.5 &&
       indentation > Math.max(18, medianHeight * 1.35) &&
-      !/[.!?;:。！？；：,，]$/.test(previous.text)
+      TERMINAL_RE.test(previous.text)
     ) {
       return true;
     }
@@ -902,7 +1089,7 @@
   }
 
   function convertTesseractBox(box) {
-    if (!box) {
+    if (!box || ![box.x0, box.y0, box.x1, box.y1].every(Number.isFinite)) {
       return null;
     }
     return {

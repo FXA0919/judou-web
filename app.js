@@ -10,7 +10,7 @@
   const MOBILE_OCR =
     navigator.userAgentData?.mobile === true ||
     /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
-  const MAX_IMAGE_EDGE = MOBILE_OCR ? 1800 : 2400;
+  const MAX_IMAGE_EDGE = MOBILE_OCR ? 1920 : 2400;
   const PADDLE_MAX_IMAGE_EDGE = MOBILE_OCR ? 1800 : 2800;
   const CLOUD_TTS_ENDPOINT = String(window.JUDOU_CLOUD_TTS_ENDPOINT || "").trim();
   const CLOUD_VOICE_CACHE = "judou-cloud-voice-v1";
@@ -982,7 +982,10 @@
     try {
       let engine = "tesseract";
       const requestedEngine = project.settings.ocrEngine;
-      if (requestedEngine === "paddle" || requestedEngine === "auto") {
+      const usePaddle = requestedEngine === "paddle" ||
+        (requestedEngine === "auto" &&
+          !(MOBILE_OCR && project.settings.ocrLanguage === "eng"));
+      if (usePaddle) {
         try {
           await assertLocalService();
           const paddle = await loadPaddleOcrModule();
@@ -1010,7 +1013,15 @@
           }
         }
       } else {
-        await runTesseractOcrPipeline();
+        try {
+          await runTesseractOcrPipeline();
+        } finally {
+          if (MOBILE_OCR && runtime.ocr.worker) {
+            await runtime.ocr.worker.terminate();
+            runtime.ocr.worker = null;
+            runtime.ocr.language = "";
+          }
+        }
       }
 
       const reconstructedDocument = window.TextPipeline.fromDocumentPages(project.pages);
@@ -1373,12 +1384,14 @@
 
         runtime.translation.completed += 1;
         updateTranslationProgress();
-        scheduleSave();
+        if (!MOBILE_OCR || runtime.translation.completed % 5 === 0) {
+          scheduleSave();
+        }
         await sleep(130);
       }
     };
 
-    await Promise.all([worker(), worker()]);
+    await Promise.all(MOBILE_OCR ? [worker()] : [worker(), worker()]);
 
     const wasStopped = token !== runtime.translation.token || !runtime.translation.active;
     runtime.translation.active = false;
@@ -1426,7 +1439,7 @@
     const provider = project.settings.translationProvider;
     const targetCode = sourceCode === "zh-CN" ? "en" : "zh-CN";
 
-    if (provider === "auto" || provider === "browser") {
+    if (provider === "browser" || (provider === "auto" && !MOBILE_OCR)) {
       const browserResult = await translateWithBrowser(
         clean,
         sourceCode,
@@ -1542,6 +1555,7 @@
     dom.grammarButtonLabel.textContent = "停止校对";
     updateGrammarProgress();
 
+    let translationStarted = false;
     try {
       await assertLocalService();
       const grammar = await preloadGrammarModel();
@@ -1575,6 +1589,9 @@
       runtime.grammar.active = false;
       dom.grammarStatus.hidden = true;
       dom.grammarButtonLabel.textContent = "保守校对";
+      if (MOBILE_OCR) {
+        await releaseGrammarModel();
+      }
       project.text = project.segments.map((segment) => segment.text).join("\n");
       renderReview();
       renderListenList();
@@ -1599,6 +1616,7 @@
         project.settings.autoTranslate &&
         !isChineseSource(project.settings.ocrLanguage)
       ) {
+        translationStarted = true;
         await translateMissingSegments();
       }
     } catch (error) {
@@ -1606,6 +1624,9 @@
       runtime.grammar.active = false;
       dom.grammarStatus.hidden = true;
       dom.grammarButtonLabel.textContent = "保守校对";
+      if (MOBILE_OCR) {
+        await releaseGrammarModel();
+      }
       if (!silent) {
         toast(
           String(error?.message || "").includes("LOCAL_SERVICE_DOWN")
@@ -1613,6 +1634,11 @@
             : "本地语法模型加载失败，已保留原文",
           "warning",
         );
+      }
+      if (translateAfter && !translationStarted &&
+        project.settings.autoTranslate &&
+        !isChineseSource(project.settings.ocrLanguage)) {
+        await translateMissingSegments();
       }
     }
   }
@@ -1627,19 +1653,95 @@
 
   function preloadGrammarModel() {
     if (!runtime.grammar.preloadPromise) {
-      runtime.grammar.preloadPromise = import(
-        "./harper-runtime.bundle.mjs?v=grammar-v17"
-      )
-        .then(async (grammar) => {
-          await grammar.warmUpHarperGrammar();
-          return grammar;
-        })
+      runtime.grammar.preloadPromise = (MOBILE_OCR
+        ? createGrammarWorkerClient()
+        : import("./harper-runtime.bundle.mjs?v=grammar-v17")
+          .then(async (grammar) => {
+            await grammar.warmUpHarperGrammar();
+            return grammar;
+          }))
         .catch((error) => {
           runtime.grammar.preloadPromise = null;
           throw error;
         });
     }
     return runtime.grammar.preloadPromise;
+  }
+
+  async function createGrammarWorkerClient() {
+    const worker = new Worker(new URL("./grammar-worker.mjs?v=layout-v2", window.location.href), {
+      type: "module",
+    });
+    const pending = new Map();
+    let nextId = 0;
+    let closed = false;
+    const rejectPending = (error) => {
+      pending.forEach(({ reject, timer }) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      pending.clear();
+    };
+    const dispose = () => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      worker.terminate();
+      rejectPending(new Error("Grammar worker stopped"));
+    };
+    worker.addEventListener("message", (event) => {
+      const reply = pending.get(event.data?.id);
+      if (!reply) {
+        return;
+      }
+      pending.delete(event.data.id);
+      clearTimeout(reply.timer);
+      if (event.data.error) {
+        reply.reject(new Error(event.data.error));
+      } else {
+        reply.resolve(event.data.result);
+      }
+    });
+    worker.addEventListener("error", (event) => {
+      rejectPending(new Error(event.message || "Grammar worker failed"));
+      dispose();
+    });
+    const request = (type, text) => new Promise((resolve, reject) => {
+      if (closed) {
+        reject(new Error("Grammar worker stopped"));
+        return;
+      }
+      const id = ++nextId;
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error("Grammar worker timed out"));
+        dispose();
+      }, 60000);
+      pending.set(id, { resolve, reject, timer });
+      worker.postMessage({ id, type, text });
+    });
+    try {
+      await request("warmup", "");
+      return { correctEnglishText: (text) => request("correct", text), dispose };
+    } catch (error) {
+      dispose();
+      throw error;
+    }
+  }
+
+  async function releaseGrammarModel() {
+    const promise = runtime.grammar.preloadPromise;
+    runtime.grammar.preloadPromise = null;
+    if (!promise) {
+      return;
+    }
+    try {
+      const grammar = await promise;
+      grammar.dispose?.();
+    } catch {
+      // A failed worker is already stopped by createGrammarWorkerClient.
+    }
   }
 
   function updateSegmentTextInput(segment) {

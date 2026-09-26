@@ -20,9 +20,9 @@
       }
     </script>
     <script defer src="./vendor/lucide/lucide.min.js"></script>
-    <script defer src="./text-engine.js?v=ocr-v19"></script>
+    <script defer src="./text-engine.js?v=layout-v2"></script>
     <script defer src="./voice-config.js?v=voice-v2"></script>
-    <script defer src="./app.js?v=mobile-ocr-v1"></script>
+    <script defer src="./app.js?v=layout-v2"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -135,7 +135,7 @@
                 <div class="option-row">
                   <label for="ocrEngine">识别引擎</label>
                   <select id="ocrEngine">
-                    <option value="auto">自动：PaddleOCR 优先</option>
+                    <option value="auto">自动：按设备选择</option>
                     <option value="paddle">PaddleOCR 高精度</option>
                     <option value="tesseract">Tesseract 快速</option>
                   </select>
